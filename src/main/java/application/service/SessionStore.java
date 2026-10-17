@@ -14,13 +14,17 @@ import java.util.concurrent.ConcurrentHashMap;
 @RequiredArgsConstructor
 public class SessionStore {
 
-    public record Session(String markdown, String testCasesJson, Instant createdAt) {
+    public record Session(String markdown, String testCasesJson, String filenamePrefix, Instant createdAt) {
     }
 
     private final AppProperties props;
     private final Map<String, Session> sessions = new ConcurrentHashMap<>();
 
     public void put(String taskId, String markdown, String testCasesJson) {
+        put(taskId, markdown, testCasesJson, "");
+    }
+
+    public void put(String taskId, String markdown, String testCasesJson, String filenamePrefix) {
         cleanup();
         int maxChars = props.getSessions().getMaxMarkdownChars();
         if (markdown != null && markdown.length() > maxChars) {
@@ -32,7 +36,7 @@ public class SessionStore {
                     .min(Comparator.comparing(e -> e.getValue().createdAt()))
                     .ifPresent(e -> sessions.remove(e.getKey()));
         }
-        sessions.put(taskId, new Session(markdown, testCasesJson, Instant.now()));
+        sessions.put(taskId, new Session(markdown, testCasesJson, filenamePrefix == null ? "" : filenamePrefix, Instant.now()));
     }
 
     public Session get(String taskId) {

@@ -12,9 +12,15 @@ app:
   pdf-to-md:
     base-url: http://localhost:8080
     connect-timeout-seconds: 10
-    read-timeout-seconds: 120
+    # pdf-to-md сам ходит в OpenRouter с таймаутом 600с (OCR PDF может быть долгим).
+    # Даём запас, чтобы не оборвать соединение раньше, чем ответит pdf-to-md.
+    read-timeout-seconds: 600
     allowed-hosts:
       - localhost
+      # Если pdf-to-md запущен на другом хосте — добавьте его сюда, например:
+      # - pdf-to-md.internal
+      # Если хотите принимать ссылки напрямую на raw MD (минуя pdf-to-md):
+      # - raw.githubusercontent.com
   sessions:
     ttl-minutes: 120
     max-count: 1000

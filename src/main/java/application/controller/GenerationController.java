@@ -33,13 +33,15 @@ public class GenerationController {
         var result = generationService.generate(markdown);
         String taskId = UUID.randomUUID().toString();
 
-        List<GeneratedFile> files = persist(result.testCases(), result.clarifications());
+        String prefix = sanitizePrefix(request.filename());
+        List<GeneratedFile> files = persist(result.testCases(), result.clarifications(), prefix);
         String status = result.clarifications().isEmpty() ? "DONE" : "NEEDS_CLARIFICATION";
 
         if ("NEEDS_CLARIFICATION".equals(status)) {
             try {
                 String json = mapper.writeValueAsString(result.testCases());
-                sessionStore.put(taskId, markdown, json);
+                // сохраняем и prefix, чтобы /answers перезаписал те же файлы
+                sessionStore.put(taskId, markdown, json, prefix);
             } catch (Exception e) {
                 throw new IllegalStateException("Ошибка сериализации сессии", e);
             }
@@ -61,14 +63,14 @@ public class GenerationController {
             String answersJson = mapper.writeValueAsString(request.answers());
             var result = generationService.answer(session.markdown(), session.testCasesJson(), answersJson);
 
-            List<GeneratedFile> files = persist(result.testCases(), result.clarifications());
+            List<GeneratedFile> files = persist(result.testCases(), result.clarifications(), session.filenamePrefix());
             String status = result.clarifications().isEmpty() ? "DONE" : "NEEDS_CLARIFICATION";
 
             if ("DONE".equals(status)) {
                 sessionStore.remove(taskId);
             } else {
                 String json = mapper.writeValueAsString(result.testCases());
-                sessionStore.put(taskId, session.markdown(), json);
+                sessionStore.put(taskId, session.markdown(), json, session.filenamePrefix());
             }
 
             return ResponseEntity.ok(new GenerateResponse(taskId, status,
@@ -90,7 +92,9 @@ public class GenerationController {
         throw new IllegalArgumentException("Нужно передать либо markdown, либо pdfToMdUrl");
     }
 
-    private List<GeneratedFile> persist(List<TestCase> testCases, List<Clarification> clarifications) {
+    private List<GeneratedFile> persist(List<TestCase> testCases,
+                                        List<Clarification> clarifications,
+                                        String prefix) {
         List<TestStorageService.PendingFile> pending = new ArrayList<>();
         List<String> ids = new ArrayList<>();
 
@@ -101,18 +105,21 @@ public class GenerationController {
                     log.warn("Дубликат id тест-кейса, файл будет переименован: {}", tc.id());
                 }
                 pending.add(new TestStorageService.PendingFile(
-                        renderer.fileNameFor(tc), renderer.render(tc, clarifications)));
+                        prefix + renderer.fileNameFor(tc),
+                        renderer.render(tc, clarifications)));
                 ids.add(tc.id());
             }
         }
         if (clarifications != null && !clarifications.isEmpty()) {
             pending.add(new TestStorageService.PendingFile(
-                    "_clarifications.md", renderer.renderClarifications(clarifications)));
+                    prefix + "_clarifications.md",
+                    renderer.renderClarifications(clarifications)));
             ids.add("_clarifications");
         }
         if (testCases != null && !testCases.isEmpty()) {
             pending.add(new TestStorageService.PendingFile(
-                    "_index.md", renderer.renderIndex(testCases, clarifications)));
+                    prefix + "_index.md",
+                    renderer.renderIndex(testCases, clarifications)));
             ids.add("_index");
         }
 
@@ -123,5 +130,20 @@ public class GenerationController {
             files.add(new GeneratedFile(ids.get(i), s.filename(), s.downloadUrl()));
         }
         return files;
+    }
+
+    /**
+     * Приводит filename к безопасному префиксу для имени файла.
+     * "swagger.yaml" -> "swagger_", "" / null -> "".
+     */
+    private String sanitizePrefix(String filename) {
+        if (filename == null || filename.isBlank()) return "";
+        String base = filename;
+        int dot = base.lastIndexOf('.');
+        if (dot > 0) base = base.substring(0, dot);
+        String cleaned = base.replaceAll("[^a-zA-Z0-9_\\-]", "_");
+        if (cleaned.isBlank()) return "";
+        if (cleaned.length() > 40) cleaned = cleaned.substring(0, 40);
+        return cleaned + "_";
     }
 }

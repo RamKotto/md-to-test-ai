@@ -3,6 +3,7 @@ package application.service;
 import application.config.AppProperties;
 import application.exception.PdfToMdClientException;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
 
@@ -28,16 +29,28 @@ public class PdfToMdClient {
                     .map(s -> s.toLowerCase().trim())
                     .collect(Collectors.toUnmodifiableSet());
         }
+        log.info("PdfToMdClient: разрешённые хосты = {}", allowedHosts);
     }
 
     public String fetchMarkdown(String absoluteUrl) {
         URI uri = validateUrl(absoluteUrl);
+        log.info("Скачивание Markdown из pdf-to-md: {}", uri);
         try {
             var entity = http.get().uri(uri).retrieve().toEntity(String.class);
+
+            MediaType contentType = entity.getHeaders().getContentType();
+            if (contentType != null
+                    && !contentType.isCompatibleWith(MediaType.TEXT_MARKDOWN)
+                    && !contentType.isCompatibleWith(MediaType.TEXT_PLAIN)
+                    && !contentType.isCompatibleWith(MediaType.APPLICATION_OCTET_STREAM)) {
+                log.warn("pdf-to-md вернул неожиданный Content-Type: {} для {}", contentType, uri);
+            }
+
             String body = entity.getBody();
             if (body == null || body.isBlank()) {
                 throw new PdfToMdClientException("pdf-to-md вернул пустой Markdown: " + absoluteUrl);
             }
+            log.info("Скачано из pdf-to-md: {} символов", body.length());
             return body;
         } catch (PdfToMdClientException e) {
             throw e;
