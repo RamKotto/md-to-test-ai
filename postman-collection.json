@@ -1,18 +1,20 @@
 {
   "info": {
     "name": "md-to-tests",
-    "description": "Генерация тест-кейсов в Markdown из Markdown-документов или из pdf-to-md. Уточнения решаются через REST-цикл answers.",
+    "description": "Генерация тест-кейсов в Markdown из raw MD или из pdf-to-md. Строгий формат TestCase (id, type, priority, preconditions, steps, expectedResult, requirementRef). Цикл уточнений через /answers. Защита от SSRF и path traversal.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
     { "key": "baseUrl", "value": "http://localhost:8082", "type": "string" },
     { "key": "pdfToMdBaseUrl", "value": "http://localhost:8080", "type": "string" },
     { "key": "taskId", "value": "", "type": "string" },
-    { "key": "downloadUrl", "value": "", "type": "string" }
+    { "key": "downloadUrl", "value": "", "type": "string" },
+    { "key": "firstFilename", "value": "", "type": "string" },
+    { "key": "lastStatus", "value": "", "type": "string" }
   ],
   "item": [
     {
-      "name": "1. Сгенерировать из Markdown",
+      "name": "1. Сгенерировать из raw Markdown",
       "event": [
         {
           "listen": "test",
@@ -20,10 +22,36 @@
             "type": "text/javascript",
             "exec": [
               "const json = pm.response.json();",
-              "if (json.taskId) { pm.collectionVariables.set('taskId', json.taskId); }",
+              "",
               "pm.test('status 200', () => pm.response.to.have.status(200));",
+              "pm.test('has taskId', () => pm.expect(json.taskId).to.be.a('string').that.is.not.empty);",
               "pm.test('has files', () => pm.expect(json.files).to.be.an('array').that.is.not.empty);",
-              "pm.test('status is valid', () => pm.expect(json.status).to.be.oneOf(['DONE','NEEDS_CLARIFICATION']));"
+              "pm.test('status valid', () => pm.expect(json.status).to.be.oneOf(['DONE','NEEDS_CLARIFICATION']));",
+              "",
+              "// Сохраняем состояние для следующих шагов",
+              "pm.collectionVariables.set('taskId', json.taskId);",
+              "pm.collectionVariables.set('lastStatus', json.status);",
+              "const mdFile = (json.files || []).find(f => f.filename !== '_index.md' && f.filename !== '_clarifications.md');",
+              "if (mdFile) { pm.collectionVariables.set('firstFilename', mdFile.filename); }",
+              "",
+              "// Строгий формат TestCase",
+              "if (Array.isArray(json.testCases) && json.testCases.length > 0) {",
+              "  const tc = json.testCases[0];",
+              "  pm.test('id format', () => pm.expect(tc.id).to.match(/^TC-(UI|API|E2E|NEG|SEC|PERF)-\\d{3,}$/));",
+              "  pm.test('type valid', () => pm.expect(tc.type).to.be.oneOf(['UI','API','E2E','NEGATIVE','SECURITY','PERFORMANCE']));",
+              "  pm.test('priority valid', () => pm.expect(tc.priority).to.be.oneOf(['P0','P1','P2','P3']));",
+              "  pm.test('preconditions array', () => pm.expect(tc.preconditions).to.be.an('array'));",
+              "  pm.test('steps non-empty', () => pm.expect(tc.steps).to.be.an('array').that.is.not.empty);",
+              "  pm.test('expectedResult non-empty', () => pm.expect(tc.expectedResult).to.be.a('string').that.is.not.empty);",
+              "  pm.test('requirementRef format', () => pm.expect(tc.requirementRef).to.match(/^(REQ-[A-Za-z0-9\\-]+|N\\/A)$/));",
+              "}",
+              "",
+              "// Filenames должны соответствовать SAFE_NAME",
+              "if (Array.isArray(json.files)) {",
+              "  pm.test('all filenames safe', () => {",
+              "    json.files.forEach(f => pm.expect(f.filename).to.match(/^[a-zA-Z0-9_\\-]+\\.md$/));",
+              "  });",
+              "}"
             ]
           }
         }
@@ -41,12 +69,12 @@
           "host": ["{{baseUrl}}"],
           "path": ["api", "generate"]
         },
-        "description": "Принимает markdown напрямую. MD-файлы создаются всегда; если status=NEEDS_CLARIFICATION — переходите к шагу 3."
+        "description": "Принимает markdown напрямую. MD-файлы создаются всегда. Если status=NEEDS_CLARIFICATION — переходите к шагу 4."
       },
       "response": []
     },
     {
-      "name": "2. Сгенерировать из pdf-to-md (по downloadUrl)",
+      "name": "2. Сгенерировать из pdf-to-md (pdfToMdUrl + filename)",
       "event": [
         {
           "listen": "test",
@@ -54,8 +82,24 @@
             "type": "text/javascript",
             "exec": [
               "const json = pm.response.json();",
-              "if (json.taskId) { pm.collectionVariables.set('taskId', json.taskId); }",
-              "pm.test('status 200', () => pm.response.to.have.status(200));"
+              "",
+              "pm.test('status 200', () => pm.response.to.have.status(200));",
+              "pm.test('has taskId', () => pm.expect(json.taskId).to.be.a('string').that.is.not.empty);",
+              "pm.test('has files', () => pm.expect(json.files).to.be.an('array').that.is.not.empty);",
+              "pm.test('status valid', () => pm.expect(json.status).to.be.oneOf(['DONE','NEEDS_CLARIFICATION']));",
+              "",
+              "// filename как префикс должен появиться в именах файлов",
+              "if (Array.isArray(json.files) && json.files.length > 0) {",
+              "  pm.test('files have prefix from filename', () => {",
+              "    const hasPrefix = json.files.some(f => f.filename.startsWith('spec_'));",
+              "    pm.expect(hasPrefix).to.be.true;",
+              "  });",
+              "}",
+              "",
+              "pm.collectionVariables.set('taskId', json.taskId);",
+              "pm.collectionVariables.set('lastStatus', json.status);",
+              "const mdFile = (json.files || []).find(f => f.filename !== '_index.md' && f.filename !== '_clarifications.md');",
+              "if (mdFile) { pm.collectionVariables.set('firstFilename', mdFile.filename); }"
             ]
           }
         }
@@ -65,7 +109,7 @@
         "header": [{ "key": "Content-Type", "value": "application/json" }],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"pdfToMdUrl\": \"{{pdfToMdBaseUrl}}/api/files/abc123_document.md\"\n}",
+          "raw": "{\n  \"pdfToMdUrl\": \"{{downloadUrl}}\",\n  \"filename\": \"spec.pdf\"\n}",
           "options": { "raw": { "language": "json" } }
         },
         "url": {
@@ -73,13 +117,125 @@
           "host": ["{{baseUrl}}"],
           "path": ["api", "generate"]
         },
-        "description": "Скачивает Markdown из pdf-to-md по downloadUrl и генерирует тест-кейсы. Замените pdfToMdUrl на реальный downloadUrl из ответа pdf-to-md."
+        "description": "Скачивает .md из pdf-to-md по {{downloadUrl}} и генерирует тест-кейсы. filename используется как префикс файлов (spec_TC-UI-001_login.md). {{downloadUrl}} заполняется вручную или шагом 'A. Загрузить PDF в pdf-to-md'."
       },
       "response": []
     },
     {
-      "name": "3. Ответить на уточнения",
+      "name": "2a. SSRF: запрещённый хост → 400",
       "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status 400', () => pm.response.to.have.status(400));",
+              "const json = pm.response.json();",
+              "pm.test('mentions host', () => pm.expect(json.message).to.include('Хост не разрешён'));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"pdfToMdUrl\": \"http://169.254.169.254/latest/meta-data\"\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/generate",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "generate"]
+        },
+        "description": "Проверяет SSRF-allowlist: запрос на чужой хост → 400."
+      },
+      "response": []
+    },
+    {
+      "name": "2b. Пустой markdown → 400",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status 400', () => pm.response.to.have.status(400));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"markdown\": \"   \"\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/generate",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "generate"]
+        },
+        "description": "Пустой/пробельный markdown должен вернуть 400."
+      },
+      "response": []
+    },
+    {
+      "name": "3. Некорректный ответ модели → 502",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status 502 or 200', () => pm.expect(pm.response.code).to.be.oneOf([200, 502]));",
+              "if (pm.response.code === 502) {",
+              "  const json = pm.response.json();",
+              "  pm.test('has error message', () => pm.expect(json.message).to.be.a('string').that.is.not.empty);",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"markdown\": \"# Документ без требований\\n\"\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/generate",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "generate"]
+        },
+        "description": "Если модель вернёт JSON не по схеме — 502 с описанием. Допускается 200, если модель справилась."
+      },
+      "response": []
+    },
+    {
+      "name": "4. Ответить на уточнения",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.collectionVariables.get('lastStatus') === 'DONE') {",
+              "  console.log('Skipping answers: status=DONE');",
+              "  pm.execution.skipRequest();",
+              "}",
+              "if (!pm.collectionVariables.get('taskId')) {",
+              "  console.log('Skipping answers: no taskId');",
+              "  pm.execution.skipRequest();",
+              "}"
+            ]
+          }
+        },
         {
           "listen": "test",
           "script": {
@@ -87,7 +243,19 @@
             "exec": [
               "const json = pm.response.json();",
               "pm.test('status 200', () => pm.response.to.have.status(200));",
-              "pm.test('has status', () => pm.expect(json.status).to.be.oneOf(['DONE','NEEDS_CLARIFICATION']));"
+              "pm.test('status valid', () => pm.expect(json.status).to.be.oneOf(['DONE','NEEDS_CLARIFICATION']));",
+              "pm.collectionVariables.set('lastStatus', json.status);",
+              "if (json.status === 'DONE') {",
+              "  pm.collectionVariables.unset('taskId');",
+              "}",
+              "",
+              "if (Array.isArray(json.testCases) && json.testCases.length > 0) {",
+              "  json.testCases.forEach(tc => {",
+              "    pm.expect(tc.id).to.match(/^TC-(UI|API|E2E|NEG|SEC|PERF)-\\d{3,}$/);",
+              "    pm.expect(tc.priority).to.be.oneOf(['P0','P1','P2','P3']);",
+              "    pm.expect(tc.preconditions).to.be.an('array');",
+              "  });",
+              "}"
             ]
           }
         }
@@ -105,33 +273,126 @@
           "host": ["{{baseUrl}}"],
           "path": ["api", "generate", "{{taskId}}", "answers"]
         },
-        "description": "Отправляет ответы на clarifications. MD-файлы перезаписываются улучшенными версиями. Если status=DONE — сессия закрыта."
+        "description": "Отправляет ответы на clarifications. MD-файлы перезаписываются. Если status=DONE — сессия закрыта."
       },
       "response": []
     },
     {
-      "name": "4. Скачать MD-тест-кейс",
+      "name": "4a. Ответ на истёкшую сессию → 400",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status 400', () => pm.response.to.have.status(400));",
+              "const json = pm.response.json();",
+              "pm.test('mentions session', () => pm.expect(json.message).to.include('Сессия не найдена'));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"answers\": [\n    { \"requirementRef\": \"REQ-001\", \"answer\": \"x\" }\n  ]\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/generate/00000000-0000-0000-0000-000000000000/answers",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "generate", "00000000-0000-0000-0000-000000000000", "answers"]
+        },
+        "description": "Несуществующий taskId → 400 'Сессия не найдена или истекла'."
+      },
+      "response": []
+    },
+    {
+      "name": "5. Скачать MD-тест-кейс",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (!pm.collectionVariables.get('firstFilename')) {",
+              "  console.log('Skipping download: no filename');",
+              "  pm.execution.skipRequest();",
+              "}"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status 200', () => pm.response.to.have.status(200));",
+              "pm.test('content-type markdown', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('text/markdown'));",
+              "pm.test('content-disposition attachment', () => pm.expect(pm.response.headers.get('Content-Disposition')).to.include('attachment'));",
+              "pm.test('content-length present', () => pm.expect(pm.response.headers.get('Content-Length')).to.be.a('string'));",
+              "",
+              "const body = pm.response.text();",
+              "pm.test('has Приоритет', () => pm.expect(body).to.include('**Приоритет:**'));",
+              "pm.test('has Шаги', () => pm.expect(body).to.include('## Шаги'));",
+              "pm.test('has Ожидаемый результат', () => pm.expect(body).to.include('## Ожидаемый результат'));"
+            ]
+          }
+        }
+      ],
       "request": {
         "method": "GET",
         "header": [],
         "url": {
-          "raw": "{{baseUrl}}/api/files/:filename",
+          "raw": "{{baseUrl}}/api/files/{{firstFilename}}",
           "host": ["{{baseUrl}}"],
-          "path": ["api", "files", ":filename"],
-          "variable": [
-            {
-              "key": "filename",
-              "value": "TC-UI-001_login.md",
-              "description": "Имя файла из files[].filename ответа /api/generate"
-            }
-          ]
+          "path": ["api", "files", "{{firstFilename}}"]
         },
-        "description": "Скачивает MD-файл тест-кейса, индекса или уточнений."
+        "description": "Скачивает MD-файл тест-кейса, имя берётся из первого files[].filename предыдущего generate."
       },
       "response": []
     },
     {
-      "name": "5. Healthcheck",
+      "name": "5a. Path traversal → 400",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status 400', () => pm.response.to.have.status(400));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/files/..%2F..%2Fetc%2Fpasswd",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "files", "..%2F..%2Fetc%2Fpasswd"]
+        },
+        "description": "SAFE_NAME regex: имя с '..' или '/' → 400."
+      },
+      "response": []
+    },
+    {
+      "name": "6. Healthcheck",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status 200', () => pm.response.to.have.status(200));",
+              "pm.test('status UP', () => pm.expect(pm.response.json().status).to.eql('UP'));"
+            ]
+          }
+        }
+      ],
       "request": {
         "method": "GET",
         "header": [],
@@ -156,8 +417,12 @@
                 "type": "text/javascript",
                 "exec": [
                   "const json = pm.response.json();",
-                  "if (json.downloadUrl) { pm.collectionVariables.set('downloadUrl', json.downloadUrl); }",
-                  "pm.test('status 200', () => pm.response.to.have.status(200));"
+                  "if (json.downloadUrl) {",
+                  "  pm.collectionVariables.set('downloadUrl', json.downloadUrl);",
+                  "  console.log('downloadUrl =', json.downloadUrl);",
+                  "}",
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('has downloadUrl', () => pm.expect(json.downloadUrl).to.be.a('string').that.is.not.empty);"
                 ]
               }
             }
@@ -176,7 +441,7 @@
               "host": ["{{pdfToMdBaseUrl}}"],
               "path": ["api", "convert"]
             },
-            "description": "Шаг 1 интеграции: загружаем PDF в pdf-to-md. downloadUrl сохраняется в переменную коллекции."
+            "description": "Шаг 1 интеграции: загружаем PDF в pdf-to-md. downloadUrl сохраняется в переменную {{downloadUrl}} для шага B."
           },
           "response": []
         },
@@ -189,8 +454,13 @@
                 "type": "text/javascript",
                 "exec": [
                   "const json = pm.response.json();",
-                  "if (json.taskId) { pm.collectionVariables.set('taskId', json.taskId); }",
-                  "pm.test('status 200', () => pm.response.to.have.status(200));"
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('has files', () => pm.expect(json.files).to.be.an('array').that.is.not.empty);",
+                  "",
+                  "pm.collectionVariables.set('taskId', json.taskId);",
+                  "pm.collectionVariables.set('lastStatus', json.status);",
+                  "const mdFile = (json.files || []).find(f => f.filename !== '_index.md' && f.filename !== '_clarifications.md');",
+                  "if (mdFile) { pm.collectionVariables.set('firstFilename', mdFile.filename); }"
                 ]
               }
             }
@@ -200,7 +470,7 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"pdfToMdUrl\": \"{{downloadUrl}}\"\n}",
+              "raw": "{\n  \"pdfToMdUrl\": \"{{downloadUrl}}\",\n  \"filename\": \"document.pdf\"\n}",
               "options": { "raw": { "language": "json" } }
             },
             "url": {
@@ -208,7 +478,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "generate"]
             },
-            "description": "Шаг 2 интеграции: md-to-tests сам скачивает MD из pdf-to-md и генерирует тест-кейсы."
+            "description": "Шаг 2 интеграции: md-to-tests сам скачивает MD из pdf-to-md по {{downloadUrl}} и генерирует тест-кейсы. Хост downloadUrl должен быть в allowed-hosts."
           },
           "response": []
         }

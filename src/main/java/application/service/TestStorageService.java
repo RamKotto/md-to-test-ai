@@ -11,6 +11,7 @@ import org.springframework.stereotype.Service;
 
 import java.io.IOException;
 import java.net.MalformedURLException;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -44,8 +45,10 @@ public class TestStorageService {
     /**
      * Атомарно сохраняет набор файлов.
      * 1) Валидирует имена и разрешает коллизии (суффикс _2, _3...).
-     * 2) Пишет всё во staging-директорию.
-     * 3) Переносит в целевую папку через ATOMIC_MOVE.
+     * 2) Пишет всё во staging-директорию ВНУТРИ целевой папки (та же ФС).
+     * 3) Переносит в целевую папку через ATOMIC_MOVE; если ФС не поддерживает
+     * атомарный перенос (Windows C:\ -> D:\, сетевые шары, FAT32) — fallback
+     * на REPLACE_EXISTING.
      * При любой ошибке на этапе (1)-(2) — ничего не попадает в целевую папку.
      */
     public List<SavedFile> saveAll(List<PendingFile> files) {
@@ -59,11 +62,13 @@ public class TestStorageService {
             }
         }
 
+        Path targetDir = props.getStorage().getDirectory();
         Path stagingDir;
         try {
-            stagingDir = Files.createTempDirectory("md-tests-staging-");
+            // staging внутри targetDir — гарантированно на той же ФС, что и target
+            stagingDir = Files.createTempDirectory(targetDir, ".staging-");
         } catch (IOException e) {
-            throw new StorageException("Не удалось создать staging-директорию", e);
+            throw new StorageException("Не удалось создать staging-директорию в " + targetDir, e);
         }
 
         List<SavedFile> result = new ArrayList<>(files.size());
@@ -77,12 +82,10 @@ public class TestStorageService {
                 staged.add(Map.entry(new PendingFile(safe, f.content()), stagedPath));
             }
 
-            Path targetDir = props.getStorage().getDirectory();
             for (var entry : staged) {
                 String name = entry.getKey().filename();
                 Path target = targetDir.resolve(name);
-                Files.move(entry.getValue(), target,
-                        StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+                moveAtomicallyOrFallback(entry.getValue(), target);
                 String downloadUrl = props.getStorage().getBaseUrl() + "/api/files/" + name;
                 result.add(new SavedFile(name, target, downloadUrl));
                 log.info("Сохранён тест-кейс: {} ({} символов)",
@@ -93,6 +96,21 @@ public class TestStorageService {
             throw new StorageException("Не удалось сохранить тест-кейсы", e);
         } finally {
             deleteRecursively(stagingDir);
+        }
+    }
+
+    /**
+     * Пытается ATOMIC_MOVE. Если ФС не поддерживает атомарный перенос
+     * (разные диски Windows, сетевые шары, FAT32) — делает обычный
+     * REPLACE_EXISTING, который работает везде.
+     */
+    private void moveAtomicallyOrFallback(Path source, Path target) throws IOException {
+        try {
+            Files.move(source, target,
+                    StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } catch (AtomicMoveNotSupportedException e) {
+            log.debug("ATOMIC_MOVE не поддерживается для {}, fallback на REPLACE_EXISTING", target);
+            Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
         }
     }
 

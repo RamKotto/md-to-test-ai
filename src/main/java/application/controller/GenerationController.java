@@ -40,7 +40,6 @@ public class GenerationController {
         if ("NEEDS_CLARIFICATION".equals(status)) {
             try {
                 String json = mapper.writeValueAsString(result.testCases());
-                // сохраняем и prefix, чтобы /answers перезаписал те же файлы
                 sessionStore.put(taskId, markdown, json, prefix);
             } catch (Exception e) {
                 throw new IllegalStateException("Ошибка сериализации сессии", e);
