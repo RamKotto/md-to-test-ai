@@ -8,6 +8,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 
 @Data
 @Validated
@@ -41,12 +43,21 @@ public class AppProperties {
         private int connectTimeoutSeconds = 10;
         @Min(1)
         private int readTimeoutSeconds = 120;
+        /**
+         * Хосты, с которых разрешено скачивать Markdown.
+         * Пустой список = разрешён только хост из base-url.
+         */
+        private List<String> allowedHosts = new ArrayList<>();
     }
 
     @Data
     public static class Sessions {
         @Min(1)
         private int ttlMinutes = 120;
+        @Min(1)
+        private int maxCount = 1000;
+        @Min(1)
+        private int maxMarkdownChars = 1_000_000;
     }
 
     @Data

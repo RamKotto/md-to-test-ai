@@ -23,8 +23,14 @@ public class Dtos {
     }
 
     public record TestCase(
-            String id, String type, String title, String requirementRef,
-            List<String> steps, String expectedResult
+            String id,
+            String type,
+            String title,
+            String requirementRef,
+            List<String> preconditions,
+            List<String> steps,
+            String expectedResult,
+            String priority
     ) {
     }
 

@@ -21,7 +21,7 @@ public class OpenRouterProperties {
     private String model = "openrouter/free";
 
     @Min(1)
-    private int maxOutputTokens = 8192;
+    private int maxOutputTokens = 50000;
 
     @Min(1)
     private int timeoutSeconds = 600;
