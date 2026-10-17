@@ -11,7 +11,9 @@
     </parent>
     <groupId>com.example</groupId>
     <artifactId>md-to-tests</artifactId>
-    <version>1.0.0</version>
+    <version>2.1.0</version>
+    <name>md-to-tests</name>
+    <description>Генерация тест-кейсов в Markdown из Markdown/PDF-to-Markdown</description>
     <properties>
         <java.version>21</java.version>
     </properties>
@@ -21,9 +23,22 @@
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
         <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
             <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
         </dependency>
     </dependencies>
     <build>
