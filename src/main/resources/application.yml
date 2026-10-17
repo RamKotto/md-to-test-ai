@@ -5,14 +5,67 @@ spring:
   application:
     name: md-to-tests
 
+app:
+  storage:
+    directory: ${user.dir}/data/tests
+    base-url: http://localhost:8082
+  pdf-to-md:
+    base-url: http://localhost:8080
+    connect-timeout-seconds: 10
+    read-timeout-seconds: 120
+  sessions:
+    ttl-minutes: 120
+  prompts:
+    json-schema: |
+      {
+        "testCases": [
+          {
+            "id": "TC-UI-001",
+            "type": "UI",
+            "title": "Название",
+            "requirementRef": "REQ-001",
+            "steps": ["Шаг 1", "Шаг 2"],
+            "expectedResult": "Ожидаемый результат"
+          }
+        ],
+        "clarifications": [
+          { "requirementRef": "REQ-005", "question": "Вопрос", "reason": "Причина" }
+        ]
+      }
+    generate: |
+      Ты — тестировщик. На вход приходит Markdown-документ (ТЗ или Swagger).
+      ВСЕГДА возвращай тест-кейсы, даже если данных не хватает — недостающие
+      значения помечай в clarifications, но сам тест-кейс создавай.
+      Верни СТРОГО JSON (без Markdown-оберток, без пояснений).
+      Схема: {{schema}}
+      Правила:
+      1. Не выдумывай данные. Если не хватает — добавь в clarifications,
+         но тест-кейс всё равно сформируй.
+      2. Только JSON.
+    answers: |
+      Ты — тестировщик. Тебе дан документ, ранее сгенерированные тест-кейсы
+      и ответы на вопросы. Улучши тест-кейсы с учётом ответов: замени
+      placeholder-ы (например «необходим пароль») на реальные значения.
+      Верни СТРОГО JSON по той же схеме: {{schema}}
+      Не дублируй существующие id. Если ответ неполный — добавь новый
+      вопрос в clarifications, но сам тест-кейс оставь.
+      Только JSON.
+
 openrouter:
   base-url: https://openrouter.ai/api/v1
   api-key: ${OPENROUTER_API_KEY:}
   model: openrouter/free
   max-output-tokens: 50000
   timeout-seconds: 600
+  connect-timeout-seconds: 30
   referer: http://localhost:8082
   title: md-to-tests
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
 
 logging:
   level:

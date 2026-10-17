@@ -1,0 +1,218 @@
+{
+  "info": {
+    "name": "md-to-tests",
+    "description": "Генерация тест-кейсов в Markdown из Markdown-документов или из pdf-to-md. Уточнения решаются через REST-цикл answers.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8082", "type": "string" },
+    { "key": "pdfToMdBaseUrl", "value": "http://localhost:8080", "type": "string" },
+    { "key": "taskId", "value": "", "type": "string" },
+    { "key": "downloadUrl", "value": "", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "1. Сгенерировать из Markdown",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const json = pm.response.json();",
+              "if (json.taskId) { pm.collectionVariables.set('taskId', json.taskId); }",
+              "pm.test('status 200', () => pm.response.to.have.status(200));",
+              "pm.test('has files', () => pm.expect(json.files).to.be.an('array').that.is.not.empty);",
+              "pm.test('status is valid', () => pm.expect(json.status).to.be.oneOf(['DONE','NEEDS_CLARIFICATION']));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"markdown\": \"# ТЗ\\n\\n## REQ-001 Логин\\nПользователь входит по email и паролю.\\n\\n## REQ-002 Создание заказа\\nТребуется указать адрес доставки.\\n\"\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/generate",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "generate"]
+        },
+        "description": "Принимает markdown напрямую. MD-файлы создаются всегда; если status=NEEDS_CLARIFICATION — переходите к шагу 3."
+      },
+      "response": []
+    },
+    {
+      "name": "2. Сгенерировать из pdf-to-md (по downloadUrl)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const json = pm.response.json();",
+              "if (json.taskId) { pm.collectionVariables.set('taskId', json.taskId); }",
+              "pm.test('status 200', () => pm.response.to.have.status(200));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"pdfToMdUrl\": \"{{pdfToMdBaseUrl}}/api/files/abc123_document.md\"\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/generate",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "generate"]
+        },
+        "description": "Скачивает Markdown из pdf-to-md по downloadUrl и генерирует тест-кейсы. Замените pdfToMdUrl на реальный downloadUrl из ответа pdf-to-md."
+      },
+      "response": []
+    },
+    {
+      "name": "3. Ответить на уточнения",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const json = pm.response.json();",
+              "pm.test('status 200', () => pm.response.to.have.status(200));",
+              "pm.test('has status', () => pm.expect(json.status).to.be.oneOf(['DONE','NEEDS_CLARIFICATION']));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"answers\": [\n    { \"requirementRef\": \"REQ-001\", \"answer\": \"Логин: email, пароль минимум 8 символов\" },\n    { \"requirementRef\": \"REQ-002\", \"answer\": \"Адрес доставки обязателен\" }\n  ]\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/generate/{{taskId}}/answers",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "generate", "{{taskId}}", "answers"]
+        },
+        "description": "Отправляет ответы на clarifications. MD-файлы перезаписываются улучшенными версиями. Если status=DONE — сессия закрыта."
+      },
+      "response": []
+    },
+    {
+      "name": "4. Скачать MD-тест-кейс",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/files/:filename",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "files", ":filename"],
+          "variable": [
+            {
+              "key": "filename",
+              "value": "TC-UI-001_login.md",
+              "description": "Имя файла из files[].filename ответа /api/generate"
+            }
+          ]
+        },
+        "description": "Скачивает MD-файл тест-кейса, индекса или уточнений."
+      },
+      "response": []
+    },
+    {
+      "name": "5. Healthcheck",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/actuator/health",
+          "host": ["{{baseUrl}}"],
+          "path": ["actuator", "health"]
+        },
+        "description": "Проверка состояния приложения."
+      },
+      "response": []
+    },
+    {
+      "name": "Интеграция: PDF → pdf-to-md → md-to-tests",
+      "item": [
+        {
+          "name": "A. Загрузить PDF в pdf-to-md",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json.downloadUrl) { pm.collectionVariables.set('downloadUrl', json.downloadUrl); }",
+                  "pm.test('status 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "file", "type": "file", "src": "/path/to/your/document.pdf" }
+              ]
+            },
+            "url": {
+              "raw": "{{pdfToMdBaseUrl}}/api/convert",
+              "host": ["{{pdfToMdBaseUrl}}"],
+              "path": ["api", "convert"]
+            },
+            "description": "Шаг 1 интеграции: загружаем PDF в pdf-to-md. downloadUrl сохраняется в переменную коллекции."
+          },
+          "response": []
+        },
+        {
+          "name": "B. Передать downloadUrl в md-to-tests",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json.taskId) { pm.collectionVariables.set('taskId', json.taskId); }",
+                  "pm.test('status 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"pdfToMdUrl\": \"{{downloadUrl}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/generate",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "generate"]
+            },
+            "description": "Шаг 2 интеграции: md-to-tests сам скачивает MD из pdf-to-md и генерирует тест-кейсы."
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}
