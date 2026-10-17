@@ -10,13 +10,22 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
-import java.util.List;
-import java.util.Map;
+import java.util.*;
+import java.util.regex.Pattern;
 
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class SyncGenerationService {
+
+    private static final Set<String> ALLOWED_TYPES =
+            Set.of("UI", "API", "E2E", "NEGATIVE", "SECURITY", "PERFORMANCE");
+    private static final Set<String> ALLOWED_PRIORITIES =
+            Set.of("P0", "P1", "P2", "P3");
+    private static final Pattern ID_PATTERN =
+            Pattern.compile("^TC-(UI|API|E2E|NEG|SEC|PERF)-\\d{3,}$");
+    private static final Pattern REQ_PATTERN =
+            Pattern.compile("^(REQ-[A-Za-z0-9\\-]+|N/A)$");
 
     private final OpenRouterClient openRouter;
     private final ObjectMapper mapper;
@@ -49,6 +58,12 @@ public class SyncGenerationService {
                     .trim();
             Map<String, Object> map = mapper.readValue(cleaned, new TypeReference<>() {
             });
+
+            if (!map.containsKey("testCases") || !map.containsKey("clarifications")) {
+                throw new GenerationException(
+                        "Ответ модели не содержит обязательных ключей testCases/clarifications");
+            }
+
             List<TestCase> testCases = mapper.convertValue(
                     map.getOrDefault("testCases", List.of()),
                     new TypeReference<List<TestCase>>() {
@@ -57,10 +72,74 @@ public class SyncGenerationService {
                     map.getOrDefault("clarifications", List.of()),
                     new TypeReference<List<Clarification>>() {
                     });
-            return new GenerationResult(testCases, clarifications);
+
+            validateTestCases(testCases);
+            validateClarifications(clarifications);
+            return new GenerationResult(testCases, dedupeClarifications(clarifications));
+        } catch (GenerationException e) {
+            throw e;
         } catch (Exception e) {
             log.error("Ошибка парсинга JSON: {}", json, e);
-            throw new GenerationException("Модель вернула невалидный JSON");
+            throw new GenerationException("Модель вернула невалидный JSON: " + e.getMessage(), e);
         }
+    }
+
+    private void validateTestCases(List<TestCase> cases) {
+        Set<String> seenIds = new HashSet<>();
+        for (TestCase tc : cases) {
+            if (isBlank(tc.id()) || !ID_PATTERN.matcher(tc.id()).matches()) {
+                throw new GenerationException("Некорректный id тест-кейса: " + tc.id());
+            }
+            if (!seenIds.add(tc.id())) {
+                throw new GenerationException("Дубликат id тест-кейса: " + tc.id());
+            }
+            if (isBlank(tc.type()) || !ALLOWED_TYPES.contains(tc.type())) {
+                throw new GenerationException("Недопустимый type: " + tc.type());
+            }
+            if (isBlank(tc.title()) || tc.title().length() > 200) {
+                throw new GenerationException("Некорректный title для " + tc.id());
+            }
+            if (isBlank(tc.requirementRef()) || !REQ_PATTERN.matcher(tc.requirementRef()).matches()) {
+                throw new GenerationException("Некорректный requirementRef для " + tc.id());
+            }
+            if (tc.preconditions() == null) {
+                throw new GenerationException("preconditions отсутствует для " + tc.id());
+            }
+            if (tc.steps() == null || tc.steps().isEmpty()) {
+                throw new GenerationException("steps пуст для " + tc.id());
+            }
+            if (isBlank(tc.expectedResult())) {
+                throw new GenerationException("expectedResult пуст для " + tc.id());
+            }
+            if (tc.priority() == null || !ALLOWED_PRIORITIES.contains(tc.priority())) {
+                throw new GenerationException("Некорректный priority для " + tc.id() + ": " + tc.priority());
+            }
+        }
+    }
+
+    private void validateClarifications(List<Clarification> clarifications) {
+        for (Clarification c : clarifications) {
+            if (isBlank(c.requirementRef()) || !REQ_PATTERN.matcher(c.requirementRef()).matches()) {
+                throw new GenerationException("Некорректный requirementRef в clarification: " + c.requirementRef());
+            }
+            if (isBlank(c.question())) {
+                throw new GenerationException("Пустой question в clarification для " + c.requirementRef());
+            }
+        }
+    }
+
+    private List<Clarification> dedupeClarifications(List<Clarification> src) {
+        Map<String, Clarification> byRef = new LinkedHashMap<>();
+        for (Clarification c : src) {
+            byRef.merge(c.requirementRef(), c,
+                    (a, b) -> new Clarification(a.requirementRef(),
+                            a.question() + " / " + b.question(),
+                            a.reason() + " / " + b.reason()));
+        }
+        return new ArrayList<>(byRef.values());
+    }
+
+    private boolean isBlank(String s) {
+        return s == null || s.isBlank();
     }
 }

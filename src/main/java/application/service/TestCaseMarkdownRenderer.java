@@ -15,6 +15,7 @@ public class TestCaseMarkdownRenderer {
         sb.append("# ").append(nullSafe(tc.id())).append(" — ").append(nullSafe(tc.title())).append("\n\n");
         sb.append("- **ID:** ").append(nullSafe(tc.id())).append("\n");
         sb.append("- **Тип:** ").append(nullSafe(tc.type())).append("\n");
+        sb.append("- **Приоритет:** ").append(nullSafe(tc.priority())).append("\n");
         sb.append("- **Требование:** ").append(nullSafe(tc.requirementRef())).append("\n\n");
 
         List<Clarification> related = relatedClarifications(tc, allClarifications);
@@ -33,6 +34,14 @@ public class TestCaseMarkdownRenderer {
                 }
                 sb.append("\n");
             }
+        }
+
+        if (tc.preconditions() != null && !tc.preconditions().isEmpty()) {
+            sb.append("## Предусловия\n\n");
+            for (String p : tc.preconditions()) {
+                sb.append("- ").append(nullSafe(p)).append("\n");
+            }
+            sb.append("\n");
         }
 
         sb.append("## Шаги\n\n");
@@ -71,7 +80,8 @@ public class TestCaseMarkdownRenderer {
                 sb.append("- [").append(nullSafe(tc.id())).append("](./")
                         .append(fileNameFor(tc)).append(") — ")
                         .append(nullSafe(tc.title()))
-                        .append(" (`").append(nullSafe(tc.type())).append("`)\n");
+                        .append(" (`").append(nullSafe(tc.type())).append("`, ")
+                        .append(nullSafe(tc.priority())).append(")\n");
             }
         }
         if (clarifications != null && !clarifications.isEmpty()) {

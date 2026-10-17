@@ -6,6 +6,7 @@ import org.springframework.stereotype.Service;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Comparator;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -21,6 +22,16 @@ public class SessionStore {
 
     public void put(String taskId, String markdown, String testCasesJson) {
         cleanup();
+        int maxChars = props.getSessions().getMaxMarkdownChars();
+        if (markdown != null && markdown.length() > maxChars) {
+            throw new IllegalArgumentException(
+                    "Документ слишком большой для сессии: " + markdown.length() + " > " + maxChars);
+        }
+        if (sessions.size() >= props.getSessions().getMaxCount()) {
+            sessions.entrySet().stream()
+                    .min(Comparator.comparing(e -> e.getValue().createdAt()))
+                    .ifPresent(e -> sessions.remove(e.getKey()));
+        }
         sessions.put(taskId, new Session(markdown, testCasesJson, Instant.now()));
     }
 

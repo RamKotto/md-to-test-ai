@@ -8,9 +8,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.UUID;
+import java.util.*;
 
 @Slf4j
 @RestController
@@ -35,7 +33,6 @@ public class GenerationController {
         var result = generationService.generate(markdown);
         String taskId = UUID.randomUUID().toString();
 
-        // MD-файлы создаются ВСЕГДА, даже если есть уточнения
         List<GeneratedFile> files = persist(result.testCases(), result.clarifications());
         String status = result.clarifications().isEmpty() ? "DONE" : "NEEDS_CLARIFICATION";
 
@@ -64,7 +61,6 @@ public class GenerationController {
             String answersJson = mapper.writeValueAsString(request.answers());
             var result = generationService.answer(session.markdown(), session.testCasesJson(), answersJson);
 
-            // Перезаписываем MD-файлы обновлёнными версиями
             List<GeneratedFile> files = persist(result.testCases(), result.clarifications());
             String status = result.clarifications().isEmpty() ? "DONE" : "NEEDS_CLARIFICATION";
 
@@ -95,24 +91,36 @@ public class GenerationController {
     }
 
     private List<GeneratedFile> persist(List<TestCase> testCases, List<Clarification> clarifications) {
-        List<GeneratedFile> files = new ArrayList<>();
+        List<TestStorageService.PendingFile> pending = new ArrayList<>();
+        List<String> ids = new ArrayList<>();
+
         if (testCases != null) {
+            Set<String> seenIds = new HashSet<>();
             for (TestCase tc : testCases) {
-                String filename = renderer.fileNameFor(tc);
-                String content = renderer.render(tc, clarifications);
-                var saved = storage.save(filename, content);
-                files.add(new GeneratedFile(tc.id(), saved.filename(), saved.downloadUrl()));
+                if (!seenIds.add(tc.id())) {
+                    log.warn("Дубликат id тест-кейса, файл будет переименован: {}", tc.id());
+                }
+                pending.add(new TestStorageService.PendingFile(
+                        renderer.fileNameFor(tc), renderer.render(tc, clarifications)));
+                ids.add(tc.id());
             }
         }
         if (clarifications != null && !clarifications.isEmpty()) {
-            String name = "_clarifications.md";
-            var saved = storage.save(name, renderer.renderClarifications(clarifications));
-            files.add(new GeneratedFile("_clarifications", saved.filename(), saved.downloadUrl()));
+            pending.add(new TestStorageService.PendingFile(
+                    "_clarifications.md", renderer.renderClarifications(clarifications)));
+            ids.add("_clarifications");
         }
         if (testCases != null && !testCases.isEmpty()) {
-            String name = "_index.md";
-            var saved = storage.save(name, renderer.renderIndex(testCases, clarifications));
-            files.add(new GeneratedFile("_index", saved.filename(), saved.downloadUrl()));
+            pending.add(new TestStorageService.PendingFile(
+                    "_index.md", renderer.renderIndex(testCases, clarifications)));
+            ids.add("_index");
+        }
+
+        var saved = storage.saveAll(pending);
+        List<GeneratedFile> files = new ArrayList<>(saved.size());
+        for (int i = 0; i < saved.size(); i++) {
+            var s = saved.get(i);
+            files.add(new GeneratedFile(ids.get(i), s.filename(), s.downloadUrl()));
         }
         return files;
     }

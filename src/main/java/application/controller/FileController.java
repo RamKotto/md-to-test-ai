@@ -11,6 +11,8 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.io.IOException;
+
 @RestController
 @RequestMapping("/api/files")
 @RequiredArgsConstructor
@@ -21,10 +23,19 @@ public class FileController {
     @GetMapping("/{filename}")
     public ResponseEntity<Resource> download(@PathVariable String filename) {
         Resource resource = storage.load(filename);
-        return ResponseEntity.ok()
+        long length;
+        try {
+            length = resource.contentLength();
+        } catch (IOException e) {
+            length = -1;
+        }
+        var builder = ResponseEntity.ok()
                 .contentType(MediaType.parseMediaType("text/markdown; charset=UTF-8"))
                 .header(HttpHeaders.CONTENT_DISPOSITION,
-                        "attachment; filename=\"" + resource.getFilename() + "\"")
-                .body(resource);
+                        "attachment; filename=\"" + resource.getFilename() + "\"");
+        if (length >= 0) {
+            builder.contentLength(length);
+        }
+        return builder.body(resource);
     }
 }
