@@ -27,8 +27,7 @@ public class SyncGenerationService {
             Pattern.compile("^TC-(UI|API|E2E|NEG|SEC|PERF)-\\d{3,}$");
 
     /**
-     * Конкретные утверждения, которые модель часто «домысливает», если их нет в документе.
-     * Группа 1 — HTTP-код, группа 2 — snake_case-имя поля/параметра, группа 3 — числовой лимит.
+     * Конкретика, которую модель часто «домысливает», если её нет в документе.
      */
     private static final Pattern CONCRETE_HTTP_CODE =
             Pattern.compile("\\b([1-5]\\d{2})\\b");
@@ -36,6 +35,17 @@ public class SyncGenerationService {
             Pattern.compile("\\b([a-z][a-z0-9]*_[a-z0-9_]+)\\b");
     private static final Pattern CONCRETE_NUMBER_LIMIT =
             Pattern.compile("\\b(\\d{2,})\\b");
+
+    /**
+     * Нейтральная замена для expectedResult, если всё утверждение было домыслом.
+     */
+    private static final String NEUTRAL_EXPECTED_RESULT =
+            "Поведение соответствует требованиям (см. уточнение)";
+    /**
+     * Нейтральная замена для шага, если из него пришлось вырезать домысел.
+     */
+    private static final String NEUTRAL_STEP_SUFFIX =
+            " (точное поведение уточняется)";
 
     private final OpenRouterClient openRouter;
     private final ObjectMapper mapper;
@@ -83,10 +93,20 @@ public class SyncGenerationService {
                     new TypeReference<List<Clarification>>() {
                     });
 
+            // 1) Структурная валидация — здесь 502 корректен: ответ модели реально сломан.
             validateTestCases(testCases);
             validateClarifications(clarifications);
-            validateGroundingInDocument(testCases, sourceMarkdown);
-            return new GenerationResult(testCases, dedupeClarifications(clarifications));
+
+            // 2) Санитизация домыслов — НЕ бросает исключение.
+            //    Вырезает неподтверждённые токены и добавляет clarification.
+            List<Clarification> groundingClarifications = new ArrayList<>();
+            List<TestCase> sanitized = sanitizeAgainstDocument(testCases, sourceMarkdown, groundingClarifications);
+
+            // 3) Объединяем clarifications модели и наши, дедуп по requirementRef.
+            List<Clarification> merged = new ArrayList<>(clarifications);
+            merged.addAll(groundingClarifications);
+
+            return new GenerationResult(sanitized, dedupeClarifications(merged));
         } catch (GenerationException e) {
             throw e;
         } catch (Exception e) {
@@ -140,21 +160,25 @@ public class SyncGenerationService {
     }
 
     /**
-     * Пост-валидация «опоры на документ»: каждое конкретное утверждение
-     * в expectedResult и steps (HTTP-код, snake_case-имя поля, числовой лимит)
-     * должно встречаться либо в исходном Markdown, либо в тексте привязанного требования.
+     * Санитизация «опоры на документ». НЕ бросает исключение:
+     * — вырезает из expectedResult/steps конкретные токены (HTTP-код, snake_case-поле,
+     * числовой лимит), которых нет ни в документе, ни в блоке привязанного требования;
+     * — если после вырезания текст стал пустым / потерял смысл — подставляет нейтральную формулировку;
+     * — добавляет по одному clarification на каждый requirementRef, где были домыслы.
      * <p>
-     * Цель — отсечь домыслы вида «HTTP 400, error: true» в тест-кейсе на требование,
-     * которое таких утверждений не содержит (см. кейс minutely_15 вне зоны покрытия).
-     * <p>
-     * Если проверка не проходит — это GenerationException → 502: модель обязана была
-     * либо сформулировать нейтрально, либо вынести вопрос в clarifications.
+     * 502 остаётся только для структурно сломанного ответа (validateTestCases/validateClarifications).
      */
-    private void validateGroundingInDocument(List<TestCase> cases, String sourceMarkdown) {
+    private List<TestCase> sanitizeAgainstDocument(
+            List<TestCase> cases,
+            String sourceMarkdown,
+            List<Clarification> outClarifications) {
+
         if (sourceMarkdown == null || sourceMarkdown.isBlank()) {
-            return;
+            return cases;
         }
         String docLower = sourceMarkdown.toLowerCase(Locale.ROOT);
+        Set<String> clarificationRefsAdded = new HashSet<>();
+        List<TestCase> result = new ArrayList<>(cases.size());
 
         for (TestCase tc : cases) {
             String ref = nullSafe(tc.requirementRef());
@@ -163,31 +187,122 @@ public class SyncGenerationService {
                     ? null
                     : requirementText.toLowerCase(Locale.ROOT);
 
-            List<String> ungrounded = new ArrayList<>();
+            Set<String> ungrounded = new LinkedHashSet<>();
 
-            // expectedResult
-            collectUngroundedTokens(nullSafe(tc.expectedResult()), docLower, refLower, ungrounded);
-            // steps
+            String sanitizedExpected = sanitizeText(
+                    nullSafe(tc.expectedResult()), docLower, refLower, ungrounded);
+            if (sanitizedExpected.isBlank()) {
+                sanitizedExpected = NEUTRAL_EXPECTED_RESULT;
+            }
+
+            List<String> sanitizedSteps = new ArrayList<>();
             if (tc.steps() != null) {
                 for (String step : tc.steps()) {
-                    collectUngroundedTokens(nullSafe(step), docLower, refLower, ungrounded);
+                    String sanitized = sanitizeText(nullSafe(step), docLower, refLower, ungrounded);
+                    if (sanitized.isBlank()) {
+                        // Шаг не должен исчезнуть — иначе steps станет пустым.
+                        sanitized = NEUTRAL_STEP_SUFFIX.trim();
+                    }
+                    sanitizedSteps.add(sanitized);
                 }
             }
 
             if (!ungrounded.isEmpty()) {
-                throw new GenerationException(
-                        "Тест-кейс " + tc.id() + " содержит утверждения, которых нет в документе "
-                                + "и в привязанном требовании " + ref + ": " + ungrounded
-                                + ". Сформулируйте expectedResult/steps нейтрально "
-                                + "или вынесите вопрос в clarifications.");
+                log.warn("Тест-кейс {}: вырезаны неподтверждённые утверждения {} (требование {})",
+                        tc.id(), ungrounded, ref);
+                if (clarificationRefsAdded.add(ref)) {
+                    outClarifications.add(new Clarification(
+                            ref,
+                            "Уточните ожидаемое поведение: в документе нет утверждений "
+                                    + String.join(", ", ungrounded)
+                                    + ", но они были указаны в тест-кейсе",
+                            "Модель домыслила конкретику, отсутствующую в требовании "
+                                    + ref + "; тест-кейс санитизирован"));
+                }
             }
+
+            result.add(new TestCase(
+                    tc.id(),
+                    tc.type(),
+                    tc.title(),
+                    tc.requirementRef(),
+                    tc.preconditions(),
+                    sanitizedSteps,
+                    sanitizedExpected,
+                    tc.priority()
+            ));
         }
+        return result;
     }
 
     /**
-     * Извлекает из Markdown блок требования по его ID.
-     * Ищем заголовок, содержащий ref, и берём текст до следующего заголовка того же или более высокого уровня.
-     * Если не нашли — возвращаем null (тогда сверяем только с полным документом).
+     * Вырезает из текста конкретные токены, отсутствующие в документе/требовании.
+     * Найденные токены складывает в {@code ungrounded}. Возвращает остаток текста.
+     */
+    private String sanitizeText(String text, String docLower, String refLower, Set<String> ungrounded) {
+        if (text.isBlank()) {
+            return text;
+        }
+        String out = text;
+
+        // HTTP-коды
+        out = replaceUngrounded(out, CONCRETE_HTTP_CODE, 1, docLower, refLower, ungrounded,
+                token -> "HTTP " + token);
+
+        // snake_case-поля
+        out = replaceUngrounded(out, CONCRETE_FIELD_NAME, 1, docLower, refLower, ungrounded,
+                token -> "поле '" + token + "'");
+
+        // числовые лимиты
+        out = replaceUngrounded(out, CONCRETE_NUMBER_LIMIT, 1, docLower, refLower, ungrounded,
+                token -> "число " + token);
+
+        // Чистим возможные артефакты "  ,", двойные пробелы, висящие запятые/скобки.
+        out = out.replaceAll("\\s*,\\s*", ", ")
+                .replaceAll("\\s{2,}", " ")
+                .replaceAll("\\s+([.,;:])", "$1")
+                .replaceAll("^[\\s,;:]+", "")
+                .replaceAll("[\\s,;:]+$", "")
+                .trim();
+        return out;
+    }
+
+    private String replaceUngrounded(
+            String text,
+            Pattern pattern,
+            int group,
+            String docLower,
+            String refLower,
+            Set<String> ungrounded,
+            java.util.function.Function<String, String> description) {
+
+        Matcher m = pattern.matcher(text);
+        StringBuilder sb = new StringBuilder();
+        int last = 0;
+        boolean changed = false;
+        while (m.find()) {
+            String token = m.group(group);
+            String tokenLower = token.toLowerCase(Locale.ROOT);
+            boolean grounded = containsToken(docLower, tokenLower)
+                    || containsToken(refLower, tokenLower);
+            if (grounded) {
+                continue;
+            }
+            ungrounded.add(description.apply(token));
+            sb.append(text, last, m.start());
+            last = m.end();
+            changed = true;
+        }
+        if (!changed) {
+            return text;
+        }
+        sb.append(text.substring(last));
+        return sb.toString();
+    }
+
+    /**
+     * Извлекает из Markdown блок требования по его ID (заголовок с ref до следующего
+     * заголовка того же/более высокого уровня). Возвращает null, если не нашли.
      */
     private String extractRequirementBlock(String markdown, String ref) {
         if (ref.isBlank() || "N/A".equalsIgnoreCase(ref)) {
@@ -197,10 +312,8 @@ public class SyncGenerationService {
         int startLine = -1;
         int headingLevel = -1;
         for (int i = 0; i < lines.length; i++) {
-            String line = lines[i];
-            if (line.contains(ref)) {
-                // Определяем уровень заголовка, если это заголовок
-                Matcher m = Pattern.compile("^(#{1,6})\\s").matcher(line);
+            if (lines[i].contains(ref)) {
+                Matcher m = Pattern.compile("^(#{1,6})\\s").matcher(lines[i]);
                 if (m.find()) {
                     startLine = i;
                     headingLevel = m.group(1).length();
@@ -224,46 +337,10 @@ public class SyncGenerationService {
         return sb.toString();
     }
 
-    /**
-     * Собирает токены из текста, которых нет ни в полном документе, ни в блоке требования.
-     */
-    private void collectUngroundedTokens(String text, String docLower, String refLower, List<String> out) {
-        if (text.isBlank()) {
-            return;
-        }
-        String textLower = text.toLowerCase(Locale.ROOT);
-
-        Matcher http = CONCRETE_HTTP_CODE.matcher(textLower);
-        while (http.find()) {
-            String token = http.group(1);
-            if (!containsToken(docLower, token) && !containsToken(refLower, token)) {
-                out.add("HTTP " + token);
-            }
-        }
-
-        Matcher field = CONCRETE_FIELD_NAME.matcher(textLower);
-        while (field.find()) {
-            String token = field.group(1);
-            if (!containsToken(docLower, token) && !containsToken(refLower, token)) {
-                out.add("поле '" + token + "'");
-            }
-        }
-
-        Matcher num = CONCRETE_NUMBER_LIMIT.matcher(textLower);
-        while (num.find()) {
-            String token = num.group(1);
-            // Числовые лимиты проверяем как отдельные числа, чтобы "400" внутри "1400" не считалось совпадением
-            if (!containsToken(docLower, token) && !containsToken(refLower, token)) {
-                out.add("число " + token);
-            }
-        }
-    }
-
     private boolean containsToken(String haystackLower, String tokenLower) {
         if (haystackLower == null) {
             return false;
         }
-        // Границы слова: цифры/буквы/подчёркивание не должны прилипать
         Pattern p = Pattern.compile("(?<![a-z0-9_])" + Pattern.quote(tokenLower) + "(?![a-z0-9_])");
         return p.matcher(haystackLower).find();
     }
