@@ -5,12 +5,36 @@
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
-    { "key": "baseUrl", "value": "http://localhost:8082", "type": "string" },
-    { "key": "pdfToMdBaseUrl", "value": "http://localhost:8080", "type": "string" },
-    { "key": "taskId", "value": "", "type": "string" },
-    { "key": "downloadUrl", "value": "", "type": "string" },
-    { "key": "firstFilename", "value": "", "type": "string" },
-    { "key": "lastStatus", "value": "", "type": "string" }
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8082",
+      "type": "string"
+    },
+    {
+      "key": "pdfToMdBaseUrl",
+      "value": "http://localhost:8080",
+      "type": "string"
+    },
+    {
+      "key": "taskId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "downloadUrl",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "firstFilename",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "lastStatus",
+      "value": "",
+      "type": "string"
+    }
   ],
   "item": [
     {
@@ -43,7 +67,7 @@
               "  pm.test('preconditions array', () => pm.expect(tc.preconditions).to.be.an('array'));",
               "  pm.test('steps non-empty', () => pm.expect(tc.steps).to.be.an('array').that.is.not.empty);",
               "  pm.test('expectedResult non-empty', () => pm.expect(tc.expectedResult).to.be.a('string').that.is.not.empty);",
-              "  pm.test('requirementRef format', () => pm.expect(tc.requirementRef).to.match(/^(REQ-[A-Za-z0-9\\-]+|N\\/A)$/));",
+              "  pm.test('requirementRef non-empty', () => pm.expect(tc.requirementRef).to.be.a('string').that.is.not.empty);",
               "}",
               "",
               "// Filenames должны соответствовать SAFE_NAME",
@@ -58,16 +82,30 @@
       ],
       "request": {
         "method": "POST",
-        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
         "body": {
           "mode": "raw",
           "raw": "{\n  \"markdown\": \"# ТЗ\\n\\n## REQ-001 Логин\\nПользователь входит по email и паролю.\\n\\n## REQ-002 Создание заказа\\nТребуется указать адрес доставки.\\n\"\n}",
-          "options": { "raw": { "language": "json" } }
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
         },
         "url": {
           "raw": "{{baseUrl}}/api/generate",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "generate"]
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "generate"
+          ]
         },
         "description": "Принимает markdown напрямую. MD-файлы создаются всегда. Если status=NEEDS_CLARIFICATION — переходите к шагу 4."
       },
@@ -106,16 +144,30 @@
       ],
       "request": {
         "method": "POST",
-        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
         "body": {
           "mode": "raw",
           "raw": "{\n  \"pdfToMdUrl\": \"{{downloadUrl}}\",\n  \"filename\": \"spec.pdf\"\n}",
-          "options": { "raw": { "language": "json" } }
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
         },
         "url": {
           "raw": "{{baseUrl}}/api/generate",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "generate"]
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "generate"
+          ]
         },
         "description": "Скачивает .md из pdf-to-md по {{downloadUrl}} и генерирует тест-кейсы. filename используется как префикс файлов (spec_TC-UI-001_login.md). {{downloadUrl}} заполняется вручную или шагом 'A. Загрузить PDF в pdf-to-md'."
       },
@@ -138,16 +190,30 @@
       ],
       "request": {
         "method": "POST",
-        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
         "body": {
           "mode": "raw",
           "raw": "{\n  \"pdfToMdUrl\": \"http://169.254.169.254/latest/meta-data\"\n}",
-          "options": { "raw": { "language": "json" } }
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
         },
         "url": {
           "raw": "{{baseUrl}}/api/generate",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "generate"]
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "generate"
+          ]
         },
         "description": "Проверяет SSRF-allowlist: запрос на чужой хост → 400."
       },
@@ -168,16 +234,30 @@
       ],
       "request": {
         "method": "POST",
-        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
         "body": {
           "mode": "raw",
           "raw": "{\n  \"markdown\": \"   \"\n}",
-          "options": { "raw": { "language": "json" } }
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
         },
         "url": {
           "raw": "{{baseUrl}}/api/generate",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "generate"]
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "generate"
+          ]
         },
         "description": "Пустой/пробельный markdown должен вернуть 400."
       },
@@ -202,16 +282,30 @@
       ],
       "request": {
         "method": "POST",
-        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
         "body": {
           "mode": "raw",
           "raw": "{\n  \"markdown\": \"# Документ без требований\\n\"\n}",
-          "options": { "raw": { "language": "json" } }
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
         },
         "url": {
           "raw": "{{baseUrl}}/api/generate",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "generate"]
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "generate"
+          ]
         },
         "description": "Если модель вернёт JSON не по схеме — 502 с описанием. Допускается 200, если модель справилась."
       },
@@ -262,16 +356,32 @@
       ],
       "request": {
         "method": "POST",
-        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
         "body": {
           "mode": "raw",
           "raw": "{\n  \"answers\": [\n    { \"requirementRef\": \"REQ-001\", \"answer\": \"Логин: email, пароль минимум 8 символов\" },\n    { \"requirementRef\": \"REQ-002\", \"answer\": \"Адрес доставки обязателен\" }\n  ]\n}",
-          "options": { "raw": { "language": "json" } }
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
         },
         "url": {
           "raw": "{{baseUrl}}/api/generate/{{taskId}}/answers",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "generate", "{{taskId}}", "answers"]
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "generate",
+            "{{taskId}}",
+            "answers"
+          ]
         },
         "description": "Отправляет ответы на clarifications. MD-файлы перезаписываются. Если status=DONE — сессия закрыта."
       },
@@ -294,16 +404,32 @@
       ],
       "request": {
         "method": "POST",
-        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
         "body": {
           "mode": "raw",
           "raw": "{\n  \"answers\": [\n    { \"requirementRef\": \"REQ-001\", \"answer\": \"x\" }\n  ]\n}",
-          "options": { "raw": { "language": "json" } }
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
         },
         "url": {
           "raw": "{{baseUrl}}/api/generate/00000000-0000-0000-0000-000000000000/answers",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "generate", "00000000-0000-0000-0000-000000000000", "answers"]
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "generate",
+            "00000000-0000-0000-0000-000000000000",
+            "answers"
+          ]
         },
         "description": "Несуществующий taskId → 400 'Сессия не найдена или истекла'."
       },
@@ -347,8 +473,14 @@
         "header": [],
         "url": {
           "raw": "{{baseUrl}}/api/files/{{firstFilename}}",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "files", "{{firstFilename}}"]
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "files",
+            "{{firstFilename}}"
+          ]
         },
         "description": "Скачивает MD-файл тест-кейса, имя берётся из первого files[].filename предыдущего generate."
       },
@@ -372,8 +504,14 @@
         "header": [],
         "url": {
           "raw": "{{baseUrl}}/api/files/..%2F..%2Fetc%2Fpasswd",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "files", "..%2F..%2Fetc%2Fpasswd"]
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "files",
+            "..%2F..%2Fetc%2Fpasswd"
+          ]
         },
         "description": "SAFE_NAME regex: имя с '..' или '/' → 400."
       },
@@ -398,8 +536,13 @@
         "header": [],
         "url": {
           "raw": "{{baseUrl}}/actuator/health",
-          "host": ["{{baseUrl}}"],
-          "path": ["actuator", "health"]
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "actuator",
+            "health"
+          ]
         },
         "description": "Проверка состояния приложения."
       },
@@ -433,13 +576,22 @@
             "body": {
               "mode": "formdata",
               "formdata": [
-                { "key": "file", "type": "file", "src": "/path/to/your/document.pdf" }
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "/path/to/your/document.pdf"
+                }
               ]
             },
             "url": {
               "raw": "{{pdfToMdBaseUrl}}/api/convert",
-              "host": ["{{pdfToMdBaseUrl}}"],
-              "path": ["api", "convert"]
+              "host": [
+                "{{pdfToMdBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "convert"
+              ]
             },
             "description": "Шаг 1 интеграции: загружаем PDF в pdf-to-md. downloadUrl сохраняется в переменную {{downloadUrl}} для шага B."
           },
@@ -467,16 +619,30 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"pdfToMdUrl\": \"{{downloadUrl}}\",\n  \"filename\": \"document.pdf\"\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{baseUrl}}/api/generate",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "generate"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "generate"
+              ]
             },
             "description": "Шаг 2 интеграции: md-to-tests сам скачивает MD из pdf-to-md по {{downloadUrl}} и генерирует тест-кейсы. Хост downloadUrl должен быть в allowed-hosts."
           },

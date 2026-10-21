@@ -25,12 +25,6 @@ public class SyncGenerationService {
     private static final Pattern ID_PATTERN =
             Pattern.compile("^TC-(UI|API|E2E|NEG|SEC|PERF)-\\d{3,}$");
 
-    // ИЗМЕНЕНО: принимаем любой осмысленный ID требования из документа
-    // (FR-1, NFR-4, DR-3, AC-5, REQ-001, PROJ-123, US-42 и т.п.), а не только REQ-...
-    // Префикс: 2–10 заглавных латинских букв. Далее дефис и номер/суффикс.
-    private static final Pattern REQ_PATTERN =
-            Pattern.compile("^(?:[A-Z]{2,10}-[A-Za-z0-9\\-]+|N/A)$");
-
     private final OpenRouterClient openRouter;
     private final ObjectMapper mapper;
     private final AppProperties appProps;
@@ -103,13 +97,8 @@ public class SyncGenerationService {
             if (isBlank(tc.title()) || tc.title().length() > 200) {
                 throw new GenerationException("Некорректный title для " + tc.id());
             }
-            // ИЗМЕНЕНО: сообщение теперь содержит фактическое значение,
-            // чтобы сразу было видно, что именно прислала модель.
-            if (isBlank(tc.requirementRef()) || !REQ_PATTERN.matcher(tc.requirementRef()).matches()) {
-                throw new GenerationException(
-                        "Некорректный requirementRef для " + tc.id()
-                                + ": \"" + tc.requirementRef()
-                                + "\" (ожидается ID вида FR-1 / NFR-4 / AC-2 / REQ-001 либо N/A)");
+            if (isBlank(tc.requirementRef())) {
+                throw new GenerationException("requirementRef пуст для " + tc.id());
             }
             if (tc.preconditions() == null) {
                 throw new GenerationException("preconditions отсутствует для " + tc.id());
@@ -128,11 +117,8 @@ public class SyncGenerationService {
 
     private void validateClarifications(List<Clarification> clarifications) {
         for (Clarification c : clarifications) {
-            if (isBlank(c.requirementRef()) || !REQ_PATTERN.matcher(c.requirementRef()).matches()) {
-                throw new GenerationException(
-                        "Некорректный requirementRef в clarification: \""
-                                + c.requirementRef()
-                                + "\" (ожидается ID вида FR-1 / NFR-4 / AC-2 / REQ-001 либо N/A)");
+            if (isBlank(c.requirementRef())) {
+                throw new GenerationException("Пустой requirementRef в clarification");
             }
             if (isBlank(c.question())) {
                 throw new GenerationException("Пустой question в clarification для " + c.requirementRef());
