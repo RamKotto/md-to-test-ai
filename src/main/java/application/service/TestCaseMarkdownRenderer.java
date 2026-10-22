@@ -20,13 +20,12 @@ public class TestCaseMarkdownRenderer {
         sb.append("- **Требование:** ").append(nullSafe(tc.requirementRef())).append("\n\n");
 
         List<Clarification> related = relatedClarifications(tc, allClarifications);
-        if (!related.isEmpty()) {
+        List<Clarification> visible = related.stream()
+                .filter(c -> c.type() == null || c.type() == ClarificationType.MISSING_REQUIREMENT)
+                .toList();
+        if (!visible.isEmpty()) {
             sb.append("## ⚠️ Требует уточнения\n\n");
-            for (Clarification c : related) {
-                // UNGROUNDED_ASSUMPTION в карточку не выводим — это не вопрос пользователю.
-                if (c.type() == ClarificationType.UNGROUNDED_ASSUMPTION) {
-                    continue;
-                }
+            for (Clarification c : visible) {
                 sb.append("> ⚠️ **Требует уточнения:** ").append(nullSafe(c.question())).append("\n");
                 if (!nullSafe(c.reason()).isBlank() && !c.reason().equals(c.question())) {
                     sb.append(">\n> _Причина:_ ").append(nullSafe(c.reason())).append("\n");
@@ -67,14 +66,18 @@ public class TestCaseMarkdownRenderer {
             sb.append("_Уточнений нет._\n");
             return sb.toString();
         }
-        // В файл выводим только MISSING_REQUIREMENT.
+        boolean any = false;
         for (Clarification c : clarifications) {
-            if (c.type() == ClarificationType.UNGROUNDED_ASSUMPTION) {
+            if (c.type() != null && c.type() == ClarificationType.UNGROUNDED_ASSUMPTION) {
                 continue;
             }
+            any = true;
             sb.append("## ").append(nullSafe(c.requirementRef())).append("\n\n");
             sb.append("**Вопрос:** ").append(nullSafe(c.question())).append("\n\n");
             sb.append("**Причина:** ").append(nullSafe(c.reason())).append("\n\n---\n\n");
+        }
+        if (!any) {
+            sb.append("_Уточнений нет._\n");
         }
         return sb.toString();
     }
@@ -92,12 +95,12 @@ public class TestCaseMarkdownRenderer {
         }
         if (clarifications != null && !clarifications.isEmpty()) {
             long missing = clarifications.stream()
-                    .filter(c -> c.type() == ClarificationType.MISSING_REQUIREMENT)
+                    .filter(c -> c.type() == null || c.type() == ClarificationType.MISSING_REQUIREMENT)
                     .count();
             if (missing > 0) {
                 sb.append("\n## ⚠️ Уточнения\n\n");
                 for (Clarification c : clarifications) {
-                    if (c.type() == ClarificationType.UNGROUNDED_ASSUMPTION) {
+                    if (c.type() != null && c.type() == ClarificationType.UNGROUNDED_ASSUMPTION) {
                         continue;
                     }
                     sb.append("- ").append(nullSafe(c.requirementRef())).append(": ")

@@ -31,7 +31,7 @@ public class Dtos {
 
     /**
      * Тип уточнения.
-     * MISSING_REQUIREMENT  — модель не знает поведение, это настоящий вопрос к пользователю.
+     * MISSING_REQUIREMENT   — модель не знает поведение, это настоящий вопрос к пользователю.
      * UNGROUNDED_ASSUMPTION — санитайзер вырезал домысел. Пользователю НЕ показывается,
      * идёт только в лог/метрику.
      */
@@ -51,6 +51,14 @@ public class Dtos {
          */
         public Clarification(String requirementRef, String question, String reason) {
             this(requirementRef, question, reason, ClarificationType.MISSING_REQUIREMENT);
+        }
+
+        /**
+         * Фабрика для fallback, когда модель вернула clarification без type.
+         */
+        public static Clarification missing(String requirementRef, String question, String reason) {
+            return new Clarification(requirementRef, question, reason,
+                    ClarificationType.MISSING_REQUIREMENT);
         }
     }
 

@@ -61,7 +61,6 @@ public class GenerationController {
 
         try {
             String answersJson = mapper.writeValueAsString(request.answers());
-            // answer() внутри не применяет санитизацию по документу: ответы — источник истины.
             var result = generationService.answer(
                     session.markdown(), session.testCasesJson(), answersJson);
 
@@ -88,13 +87,13 @@ public class GenerationController {
 
     /**
      * NEEDS_CLARIFICATION только если есть настоящие вопросы пользователю.
-     * UNGROUNDED_ASSUMPTION — это сигнал о качестве генерации, он не требует
-     * возврата к пользователю и не должен блокировать DONE.
+     * type==null трактуем как MISSING_REQUIREMENT (на случай старых сессий).
      */
     private boolean hasMissingRequirements(List<Clarification> clarifications) {
         if (clarifications == null || clarifications.isEmpty()) return false;
         return clarifications.stream()
-                .anyMatch(c -> c.type() == ClarificationType.MISSING_REQUIREMENT);
+                .anyMatch(c -> c.type() == null
+                        || c.type() == ClarificationType.MISSING_REQUIREMENT);
     }
 
     private String resolveMarkdown(GenerateRequest request) {
@@ -125,9 +124,9 @@ public class GenerationController {
                 ids.add(tc.id());
             }
         }
-        // _clarifications.md пишем, только если есть настоящие вопросы пользователю.
-        if (clarifications != null && clarifications.stream()
-                .anyMatch(c -> c.type() == ClarificationType.MISSING_REQUIREMENT)) {
+        boolean hasMissing = clarifications != null && clarifications.stream()
+                .anyMatch(c -> c.type() == null || c.type() == ClarificationType.MISSING_REQUIREMENT);
+        if (hasMissing) {
             pending.add(new TestStorageService.PendingFile(
                     prefix + "_clarifications.md",
                     renderer.renderClarifications(clarifications)));
