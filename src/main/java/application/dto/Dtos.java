@@ -8,9 +8,7 @@ public class Dtos {
      * Один из двух вариантов:
      * - markdown: готовый Markdown-текст
      * - pdfToMdUrl: абсолютный http(s)-URL на .md, отданный pdf-to-md
-     * filename — необязательное имя исходного документа. Если pdf-to-md вернул
-     * filename в ConvertResponse, можно передать его сюда; используется
-     * для префиксации имён сгенерированных файлов (например, "swagger_TC-UI-001_login.md").
+     * filename — необязательное имя исходного документа.
      */
     public record GenerateRequest(String markdown, String pdfToMdUrl, String filename) {
         public boolean hasMarkdown() {
@@ -31,7 +29,29 @@ public class Dtos {
         }
     }
 
-    public record Clarification(String requirementRef, String question, String reason) {
+    /**
+     * Тип уточнения.
+     * MISSING_REQUIREMENT  — модель не знает поведение, это настоящий вопрос к пользователю.
+     * UNGROUNDED_ASSUMPTION — санитайзер вырезал домысел. Пользователю НЕ показывается,
+     * идёт только в лог/метрику.
+     */
+    public enum ClarificationType {
+        MISSING_REQUIREMENT,
+        UNGROUNDED_ASSUMPTION
+    }
+
+    public record Clarification(
+            String requirementRef,
+            String question,
+            String reason,
+            ClarificationType type
+    ) {
+        /**
+         * Backward-compatible конструктор: по умолчанию — настоящий вопрос.
+         */
+        public Clarification(String requirementRef, String question, String reason) {
+            this(requirementRef, question, reason, ClarificationType.MISSING_REQUIREMENT);
+        }
     }
 
     public record TestCase(

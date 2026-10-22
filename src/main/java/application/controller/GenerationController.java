@@ -35,7 +35,8 @@ public class GenerationController {
 
         String prefix = sanitizePrefix(request.filename());
         List<GeneratedFile> files = persist(result.testCases(), result.clarifications(), prefix);
-        String status = result.clarifications().isEmpty() ? "DONE" : "NEEDS_CLARIFICATION";
+        String status = hasMissingRequirements(result.clarifications())
+                ? "NEEDS_CLARIFICATION" : "DONE";
 
         if ("NEEDS_CLARIFICATION".equals(status)) {
             try {
@@ -60,10 +61,14 @@ public class GenerationController {
 
         try {
             String answersJson = mapper.writeValueAsString(request.answers());
-            var result = generationService.answer(session.markdown(), session.testCasesJson(), answersJson);
+            // answer() внутри не применяет санитизацию по документу: ответы — источник истины.
+            var result = generationService.answer(
+                    session.markdown(), session.testCasesJson(), answersJson);
 
-            List<GeneratedFile> files = persist(result.testCases(), result.clarifications(), session.filenamePrefix());
-            String status = result.clarifications().isEmpty() ? "DONE" : "NEEDS_CLARIFICATION";
+            List<GeneratedFile> files = persist(result.testCases(), result.clarifications(),
+                    session.filenamePrefix());
+            String status = hasMissingRequirements(result.clarifications())
+                    ? "NEEDS_CLARIFICATION" : "DONE";
 
             if ("DONE".equals(status)) {
                 sessionStore.remove(taskId);
@@ -79,6 +84,17 @@ public class GenerationController {
         } catch (Exception e) {
             throw new IllegalStateException("Ошибка обработки ответов", e);
         }
+    }
+
+    /**
+     * NEEDS_CLARIFICATION только если есть настоящие вопросы пользователю.
+     * UNGROUNDED_ASSUMPTION — это сигнал о качестве генерации, он не требует
+     * возврата к пользователю и не должен блокировать DONE.
+     */
+    private boolean hasMissingRequirements(List<Clarification> clarifications) {
+        if (clarifications == null || clarifications.isEmpty()) return false;
+        return clarifications.stream()
+                .anyMatch(c -> c.type() == ClarificationType.MISSING_REQUIREMENT);
     }
 
     private String resolveMarkdown(GenerateRequest request) {
@@ -109,7 +125,9 @@ public class GenerationController {
                 ids.add(tc.id());
             }
         }
-        if (clarifications != null && !clarifications.isEmpty()) {
+        // _clarifications.md пишем, только если есть настоящие вопросы пользователю.
+        if (clarifications != null && clarifications.stream()
+                .anyMatch(c -> c.type() == ClarificationType.MISSING_REQUIREMENT)) {
             pending.add(new TestStorageService.PendingFile(
                     prefix + "_clarifications.md",
                     renderer.renderClarifications(clarifications)));

@@ -2,6 +2,7 @@ package application.service;
 
 import application.config.AppProperties;
 import application.dto.Dtos.Clarification;
+import application.dto.Dtos.ClarificationType;
 import application.dto.Dtos.TestCase;
 import application.exception.GenerationException;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -27,25 +28,41 @@ public class SyncGenerationService {
             Pattern.compile("^TC-(UI|API|E2E|NEG|SEC|PERF)-\\d{3,}$");
 
     /**
-     * Конкретика, которую модель часто «домысливает», если её нет в документе.
+     * HTTP-коды. Расширенный whitelist: 1xx–5xx «общие» коды считаются нормальной
+     * конкретикой, если рядом есть слово http/статус/ошибка/ответ — см. isGroundedHttpCode.
      */
     private static final Pattern CONCRETE_HTTP_CODE =
             Pattern.compile("\\b([1-5]\\d{2})\\b");
-    private static final Pattern CONCRETE_FIELD_NAME =
-            Pattern.compile("\\b([a-z][a-z0-9]*_[a-z0-9_]+)\\b");
-    private static final Pattern CONCRETE_NUMBER_LIMIT =
-            Pattern.compile("\\b(\\d{2,})\\b");
+    private static final Set<String> HTTP_CODE_WHITELIST =
+            Set.of("200", "201", "204", "400", "401", "403", "404", "409", "422",
+                    "429", "500", "502", "503");
 
     /**
-     * Нейтральная замена для expectedResult, если всё утверждение было домыслом.
+     * Имена полей API (snake_case). Проверяем только известные «опасные» имена,
+     * которые модель любит домысливать. Остальное не трогаем — иначе ловим
+     * служебные поля вроде utc_offset_seconds, snake_case и т.п.
      */
+    private static final Pattern CONCRETE_FIELD_NAME =
+            Pattern.compile("\\b([a-z][a-z0-9]*_[a-z0-9_]+)\\b");
+    private static final Set<String> FIELD_NAME_WHITELIST = Set.of(
+            // служебные поля ответа, которые допустимы всегда
+            "utc_offset_seconds", "snake_case", "requirement_ref",
+            // общие имена, которые не являются «домыслом» сами по себе
+            "error_message", "error_code", "request_id", "response_time"
+    );
+
+    /**
+     * Числовые лимиты. Сузили до 3+ цифр: одиночные/двузначные числа
+     * (52, 13, 41, 17, 16) больше не считаются домыслом — это либо координаты-примеры,
+     * либо границы диапазонов, которые модель вправе назвать нейтрально.
+     */
+    private static final Pattern CONCRETE_NUMBER_LIMIT =
+            Pattern.compile("\\b(\\d{3,})\\b");
+
     private static final String NEUTRAL_EXPECTED_RESULT =
             "Поведение соответствует требованиям (см. уточнение)";
-    /**
-     * Нейтральная замена для шага, если из него пришлось вырезать домысел.
-     */
     private static final String NEUTRAL_STEP_SUFFIX =
-            " (точное поведение уточняется)";
+            "(точное поведение уточняется)";
 
     private final OpenRouterClient openRouter;
     private final ObjectMapper mapper;
@@ -57,10 +74,18 @@ public class SyncGenerationService {
     public GenerationResult generate(String markdown) {
         String prompt = appProps.getPrompts().getGenerate()
                 .replace("{{schema}}", appProps.getPrompts().getJsonSchema());
-        String response = openRouter.complete(prompt, markdown);
-        return parseResponse(response, markdown);
+        // Явный whitelist разрешённых конкретных токенов, извлечённых из документа.
+        String userText = markdown + "\n\n## Разрешённые конкретные значения (из документа)\n"
+                + extractAllowedTokens(markdown);
+        String response = openRouter.complete(prompt, userText);
+        return parseResponse(response, markdown, null);
     }
 
+    /**
+     * Ответы пользователя — источник истины. Санитизация по документу здесь
+     * НЕ применяется (иначе ответ «forecast_days 1..16» снова вырежется и снова
+     * породит clarification → бесконечный цикл).
+     */
     public GenerationResult answer(String markdown, String existingJson, String answersJson) {
         String prompt = appProps.getPrompts().getAnswers()
                 .replace("{{schema}}", appProps.getPrompts().getJsonSchema());
@@ -68,10 +93,16 @@ public class SyncGenerationService {
                 + "\n\n## Ранее сгенерированные тест-кейсы\n" + existingJson
                 + "\n\n## Ответы на уточнения\n" + answersJson;
         String response = openRouter.complete(prompt, userText);
-        return parseResponse(response, markdown);
+        // skipSanitize=true: после ответов пользователя grounding-источник — ответы, а не документ.
+        return parseResponse(response, markdown, answersJson);
     }
 
-    private GenerationResult parseResponse(String json, String sourceMarkdown) {
+    /**
+     * @param groundingAnswers JSON с ответами пользователя; если не null — используется
+     *                         как дополнительный источник «заземления» и отключает
+     *                         генерацию UNGROUNDED_ASSUMPTION (это не вопрос пользователю).
+     */
+    private GenerationResult parseResponse(String json, String sourceMarkdown, String groundingAnswers) {
         try {
             String cleaned = json.replaceAll("^```json\\s*", "")
                     .replaceAll("```\\s*$", "")
@@ -84,26 +115,28 @@ public class SyncGenerationService {
                         "Ответ модели не содержит обязательных ключей testCases/clarifications");
             }
 
-            List<TestCase> testCases = mapper.convertValue(
+            List<TestCase> rawCases = mapper.convertValue(
                     map.getOrDefault("testCases", List.of()),
                     new TypeReference<List<TestCase>>() {
                     });
-            List<Clarification> clarifications = mapper.convertValue(
+            List<Clarification> modelClarifications = mapper.convertValue(
                     map.getOrDefault("clarifications", List.of()),
                     new TypeReference<List<Clarification>>() {
                     });
 
-            // 1) Структурная валидация — здесь 502 корректен: ответ модели реально сломан.
-            validateTestCases(testCases);
-            validateClarifications(clarifications);
+            // 1) Структурная валидация: жёсткая (502) + мягкая (исправляем).
+            List<TestCase> validated = validateAndRepairTestCases(rawCases);
+            validateClarifications(modelClarifications);
 
-            // 2) Санитизация домыслов — НЕ бросает исключение.
-            //    Вырезает неподтверждённые токены и добавляет clarification.
+            // 2) Санитизация домыслов. При наличии ответов пользователя
+            //    UNGROUNDED_ASSUMPTION не генерируем — это не вопрос пользователю.
             List<Clarification> groundingClarifications = new ArrayList<>();
-            List<TestCase> sanitized = sanitizeAgainstDocument(testCases, sourceMarkdown, groundingClarifications);
+            List<TestCase> sanitized = sanitizeAgainstDocument(
+                    validated, sourceMarkdown, groundingAnswers, groundingClarifications);
 
-            // 3) Объединяем clarifications модели и наши, дедуп по requirementRef.
-            List<Clarification> merged = new ArrayList<>(clarifications);
+            // 3) Объединяем: модельные + grounding. Дедуп по requirementRef,
+            //    приоритет у MISSING_REQUIREMENT, и по одному вопросу на ref.
+            List<Clarification> merged = new ArrayList<>(modelClarifications);
             merged.addAll(groundingClarifications);
 
             return new GenerationResult(sanitized, dedupeClarifications(merged));
@@ -115,37 +148,75 @@ public class SyncGenerationService {
         }
     }
 
-    private void validateTestCases(List<TestCase> cases) {
+    /**
+     * Мягкая валидация: восстанавливаем то, что можно восстановить, вместо 502.
+     * 502 остаётся только для реально сломанного ответа (нет steps/expectedResult/id).
+     */
+    private List<TestCase> validateAndRepairTestCases(List<TestCase> cases) {
         Set<String> seenIds = new HashSet<>();
+        List<TestCase> repaired = new ArrayList<>(cases.size());
+        int autoSeq = 1;
+
         for (TestCase tc : cases) {
-            if (isBlank(tc.id()) || !ID_PATTERN.matcher(tc.id()).matches()) {
-                throw new GenerationException("Некорректный id тест-кейса: " + tc.id());
+            // id: если битый — перенумеровываем
+            String id = tc.id();
+            if (isBlank(id) || !ID_PATTERN.matcher(id).matches()) {
+                String type = safeType(tc.type());
+                id = "TC-" + typeShort(type) + "-" + String.format("%03d", autoSeq++);
+                log.warn("Некорректный id '{}' заменён на '{}'", tc.id(), id);
             }
-            if (!seenIds.add(tc.id())) {
-                throw new GenerationException("Дубликат id тест-кейса: " + tc.id());
+            if (!seenIds.add(id)) {
+                String type = safeType(tc.type());
+                String newId;
+                do {
+                    newId = "TC-" + typeShort(type) + "-" + String.format("%03d", autoSeq++);
+                } while (!seenIds.add(newId));
+                log.warn("Дубликат id '{}' заменён на '{}'", id, newId);
+                id = newId;
             }
-            if (isBlank(tc.type()) || !ALLOWED_TYPES.contains(tc.type())) {
-                throw new GenerationException("Недопустимый type: " + tc.type());
+
+            // type: если не из списка — NEGATIVE-дефолт не годится, ставим UI и логируем
+            String type = tc.type();
+            if (isBlank(type) || !ALLOWED_TYPES.contains(type)) {
+                log.warn("Недопустимый type '{}' для {} — заменён на UI", type, id);
+                type = "UI";
             }
-            if (isBlank(tc.title()) || tc.title().length() > 200) {
-                throw new GenerationException("Некорректный title для " + tc.id());
+
+            // title: обрезаем до 200
+            String title = nullSafe(tc.title());
+            if (title.isBlank()) {
+                throw new GenerationException("Некорректный title для " + id);
             }
+            if (title.length() > 200) {
+                title = title.substring(0, 200).trim();
+            }
+
             if (isBlank(tc.requirementRef())) {
-                throw new GenerationException("requirementRef пуст для " + tc.id());
+                throw new GenerationException("requirementRef пуст для " + id);
             }
             if (tc.preconditions() == null) {
-                throw new GenerationException("preconditions отсутствует для " + tc.id());
+                // preconditions может быть пустым массивом, но не null
+                tc = new TestCase(tc.id(), tc.type(), tc.title(), tc.requirementRef(),
+                        List.of(), tc.steps(), tc.expectedResult(), tc.priority());
             }
             if (tc.steps() == null || tc.steps().isEmpty()) {
-                throw new GenerationException("steps пуст для " + tc.id());
+                throw new GenerationException("steps пуст для " + id);
             }
             if (isBlank(tc.expectedResult())) {
-                throw new GenerationException("expectedResult пуст для " + tc.id());
+                throw new GenerationException("expectedResult пуст для " + id);
             }
-            if (tc.priority() == null || !ALLOWED_PRIORITIES.contains(tc.priority())) {
-                throw new GenerationException("Некорректный priority для " + tc.id() + ": " + tc.priority());
+
+            // priority: если пустой/битый — P2 (мягкая починка)
+            String priority = tc.priority();
+            if (priority == null || !ALLOWED_PRIORITIES.contains(priority)) {
+                log.warn("Некорректный priority '{}' для {} — заменён на P2", priority, id);
+                priority = "P2";
             }
+
+            repaired.add(new TestCase(id, type, title, tc.requirementRef(),
+                    tc.preconditions(), tc.steps(), tc.expectedResult(), priority));
         }
+        return repaired;
     }
 
     private void validateClarifications(List<Clarification> clarifications) {
@@ -160,23 +231,26 @@ public class SyncGenerationService {
     }
 
     /**
-     * Санитизация «опоры на документ». НЕ бросает исключение:
-     * — вырезает из expectedResult/steps конкретные токены (HTTP-код, snake_case-поле,
-     * числовой лимит), которых нет ни в документе, ни в блоке привязанного требования;
-     * — если после вырезания текст стал пустым / потерял смысл — подставляет нейтральную формулировку;
-     * — добавляет по одному clarification на каждый requirementRef, где были домыслы.
+     * Санитизация «опоры на документ». НЕ бросает исключение.
      * <p>
-     * 502 остаётся только для структурно сломанного ответа (validateTestCases/validateClarifications).
+     * Важно: при наличии {@code groundingAnswers} (ответы пользователя) —
+     * UNGROUNDED_ASSUMPTION не генерируется, потому что источник истины
+     * теперь ответы пользователя, а не документ.
      */
     private List<TestCase> sanitizeAgainstDocument(
             List<TestCase> cases,
             String sourceMarkdown,
+            String groundingAnswers,
             List<Clarification> outClarifications) {
 
+        boolean answersProvided = groundingAnswers != null && !groundingAnswers.isBlank();
         if (sourceMarkdown == null || sourceMarkdown.isBlank()) {
             return cases;
         }
         String docLower = sourceMarkdown.toLowerCase(Locale.ROOT);
+        String answersLower = answersProvided
+                ? groundingAnswers.toLowerCase(Locale.ROOT)
+                : null;
         Set<String> clarificationRefsAdded = new HashSet<>();
         List<TestCase> result = new ArrayList<>(cases.size());
 
@@ -190,7 +264,7 @@ public class SyncGenerationService {
             Set<String> ungrounded = new LinkedHashSet<>();
 
             String sanitizedExpected = sanitizeText(
-                    nullSafe(tc.expectedResult()), docLower, refLower, ungrounded);
+                    nullSafe(tc.expectedResult()), docLower, refLower, answersLower, ungrounded);
             if (sanitizedExpected.isBlank()) {
                 sanitizedExpected = NEUTRAL_EXPECTED_RESULT;
             }
@@ -198,9 +272,9 @@ public class SyncGenerationService {
             List<String> sanitizedSteps = new ArrayList<>();
             if (tc.steps() != null) {
                 for (String step : tc.steps()) {
-                    String sanitized = sanitizeText(nullSafe(step), docLower, refLower, ungrounded);
+                    String sanitized = sanitizeText(
+                            nullSafe(step), docLower, refLower, answersLower, ungrounded);
                     if (sanitized.isBlank()) {
-                        // Шаг не должен исчезнуть — иначе steps станет пустым.
                         sanitized = NEUTRAL_STEP_SUFFIX.trim();
                     }
                     sanitizedSteps.add(sanitized);
@@ -210,14 +284,17 @@ public class SyncGenerationService {
             if (!ungrounded.isEmpty()) {
                 log.warn("Тест-кейс {}: вырезаны неподтверждённые утверждения {} (требование {})",
                         tc.id(), ungrounded, ref);
-                if (clarificationRefsAdded.add(ref)) {
+                // UNGROUNDED_ASSUMPTION — только когда нет ответов пользователя.
+                // Это не вопрос пользователю, а сигнал о качестве генерации.
+                if (!answersProvided && clarificationRefsAdded.add(ref)) {
                     outClarifications.add(new Clarification(
                             ref,
                             "Уточните ожидаемое поведение: в документе нет утверждений "
                                     + String.join(", ", ungrounded)
                                     + ", но они были указаны в тест-кейсе",
                             "Модель домыслила конкретику, отсутствующую в требовании "
-                                    + ref + "; тест-кейс санитизирован"));
+                                    + ref + "; тест-кейс санитизирован",
+                            ClarificationType.UNGROUNDED_ASSUMPTION));
                 }
             }
 
@@ -235,29 +312,31 @@ public class SyncGenerationService {
         return result;
     }
 
-    /**
-     * Вырезает из текста конкретные токены, отсутствующие в документе/требовании.
-     * Найденные токены складывает в {@code ungrounded}. Возвращает остаток текста.
-     */
-    private String sanitizeText(String text, String docLower, String refLower, Set<String> ungrounded) {
+    private String sanitizeText(String text, String docLower, String refLower,
+                                String answersLower, Set<String> ungrounded) {
         if (text.isBlank()) {
             return text;
         }
         String out = text;
 
-        // HTTP-коды
-        out = replaceUngrounded(out, CONCRETE_HTTP_CODE, 1, docLower, refLower, ungrounded,
-                token -> "HTTP " + token);
+        // HTTP-коды: whitelist общих кодов + whitelist по документу/ответам/требованию.
+        out = replaceUngrounded(out, CONCRETE_HTTP_CODE, 1, docLower, refLower, answersLower,
+                ungrounded,
+                token -> "HTTP " + token,
+                token -> HTTP_CODE_WHITELIST.contains(token) || isGroundedHttpContext(text, token));
 
-        // snake_case-поля
-        out = replaceUngrounded(out, CONCRETE_FIELD_NAME, 1, docLower, refLower, ungrounded,
-                token -> "поле '" + token + "'");
+        // snake_case-поля: только «опасные», которые не в whitelist и не заземлены.
+        out = replaceUngrounded(out, CONCRETE_FIELD_NAME, 1, docLower, refLower, answersLower,
+                ungrounded,
+                token -> "поле '" + token + "'",
+                FIELD_NAME_WHITELIST::contains);
 
-        // числовые лимиты
-        out = replaceUngrounded(out, CONCRETE_NUMBER_LIMIT, 1, docLower, refLower, ungrounded,
-                token -> "число " + token);
+        // Числовые лимиты: только 3+ цифр (52/13/41/8601 больше не домысел).
+        out = replaceUngrounded(out, CONCRETE_NUMBER_LIMIT, 1, docLower, refLower, answersLower,
+                ungrounded,
+                token -> "число " + token,
+                token -> false);
 
-        // Чистим возможные артефакты "  ,", двойные пробелы, висящие запятые/скобки.
         out = out.replaceAll("\\s*,\\s*", ", ")
                 .replaceAll("\\s{2,}", " ")
                 .replaceAll("\\s+([.,;:])", "$1")
@@ -267,14 +346,29 @@ public class SyncGenerationService {
         return out;
     }
 
+    /**
+     * HTTP-код считается «заземлённым», если рядом (в пределах 20 символов) есть
+     * слово http/статус/status/ошибк/error/ответ/response. Это устраняет вырезание
+     * «HTTP 200» из фразы «успешный ответ».
+     */
+    private boolean isGroundedHttpContext(String text, String code) {
+        Pattern p = Pattern.compile(
+                "(?i)(?:http|статус|status|ошибк|error|ответ|response).{0,20}\\b"
+                        + Pattern.quote(code) + "\\b|\\b" + Pattern.quote(code)
+                        + "\\b.{0,20}(?:http|статус|status|ошибк|error|ответ|response)");
+        return p.matcher(text).find();
+    }
+
     private String replaceUngrounded(
             String text,
             Pattern pattern,
             int group,
             String docLower,
             String refLower,
+            String answersLower,
             Set<String> ungrounded,
-            java.util.function.Function<String, String> description) {
+            java.util.function.Function<String, String> description,
+            java.util.function.Predicate<String> whitelist) {
 
         Matcher m = pattern.matcher(text);
         StringBuilder sb = new StringBuilder();
@@ -283,8 +377,10 @@ public class SyncGenerationService {
         while (m.find()) {
             String token = m.group(group);
             String tokenLower = token.toLowerCase(Locale.ROOT);
-            boolean grounded = containsToken(docLower, tokenLower)
-                    || containsToken(refLower, tokenLower);
+            boolean grounded = whitelist.test(token)
+                    || containsToken(docLower, tokenLower)
+                    || containsToken(refLower, tokenLower)
+                    || (answersLower != null && containsToken(answersLower, tokenLower));
             if (grounded) {
                 continue;
             }
@@ -345,15 +441,81 @@ public class SyncGenerationService {
         return p.matcher(haystackLower).find();
     }
 
+    /**
+     * Дедуп: один requirementRef — один вопрос. Приоритет MISSING_REQUIREMENT
+     * над UNGROUNDED_ASSUMPTION. Тексты не склеиваются через " / " — берём
+     * наиболее полный вариант; остальные сохраняются в reason как детализация.
+     */
     private List<Clarification> dedupeClarifications(List<Clarification> src) {
-        Map<String, Clarification> byRef = new LinkedHashMap<>();
+        Map<String, List<Clarification>> byRef = new LinkedHashMap<>();
         for (Clarification c : src) {
-            byRef.merge(c.requirementRef(), c,
-                    (a, b) -> new Clarification(a.requirementRef(),
-                            a.question() + " / " + b.question(),
-                            a.reason() + " / " + b.reason()));
+            byRef.computeIfAbsent(c.requirementRef(), k -> new ArrayList<>()).add(c);
         }
-        return new ArrayList<>(byRef.values());
+        List<Clarification> out = new ArrayList<>(byRef.size());
+        for (Map.Entry<String, List<Clarification>> e : byRef.entrySet()) {
+            List<Clarification> group = e.getValue();
+            // MISSING_REQUIREMENT важнее
+            Clarification primary = group.stream()
+                    .filter(c -> c.type() == ClarificationType.MISSING_REQUIREMENT)
+                    .findFirst()
+                    .orElse(group.get(0));
+            String details = group.size() > 1
+                    ? "Дополнительные детали: " + group.stream()
+                    .filter(c -> c != primary)
+                    .map(Clarification::question)
+                    .reduce((a, b) -> a + "; " + b)
+                    .orElse("")
+                    : primary.reason();
+            out.add(new Clarification(
+                    e.getKey(),
+                    primary.question(),
+                    details,
+                    primary.type()
+            ));
+        }
+        return out;
+    }
+
+    /**
+     * Извлекает из документа конкретные токены (HTTP-коды, имена полей, числа),
+     * чтобы передать их модели в user-промпт как «разрешённые».
+     */
+    private String extractAllowedTokens(String markdown) {
+        if (markdown == null || markdown.isBlank()) {
+            return "(пусто)";
+        }
+        Set<String> httpCodes = new TreeSet<>();
+        Set<String> fields = new TreeSet<>();
+        Set<String> numbers = new TreeSet<>();
+
+        Matcher m = CONCRETE_HTTP_CODE.matcher(markdown);
+        while (m.find()) {
+            if (HTTP_CODE_WHITELIST.contains(m.group(1))) httpCodes.add(m.group(1));
+        }
+        m = CONCRETE_FIELD_NAME.matcher(markdown);
+        while (m.find()) fields.add(m.group(1));
+        m = CONCRETE_NUMBER_LIMIT.matcher(markdown);
+        while (m.find()) numbers.add(m.group(1));
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("- HTTP-коды: ").append(httpCodes.isEmpty() ? "(нет)" : httpCodes).append('\n');
+        sb.append("- Имена полей: ").append(fields.isEmpty() ? "(нет)" : fields).append('\n');
+        sb.append("- Числа: ").append(numbers.isEmpty() ? "(нет)" : numbers).append('\n');
+        sb.append("Используй ТОЛЬКО эти конкретные значения. Всё остальное — clarification.");
+        return sb.toString();
+    }
+
+    private String safeType(String type) {
+        return type == null || !ALLOWED_TYPES.contains(type) ? "UI" : type;
+    }
+
+    private String typeShort(String type) {
+        return switch (type) {
+            case "NEGATIVE" -> "NEG";
+            case "SECURITY" -> "SEC";
+            case "PERFORMANCE" -> "PERF";
+            default -> type;
+        };
     }
 
     private boolean isBlank(String s) {
