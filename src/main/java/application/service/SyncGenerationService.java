@@ -52,13 +52,27 @@ public class SyncGenerationService {
     private static final Pattern ABSOLUTE_URL =
             Pattern.compile("https?://[^\\s)\\]\"'`]+");
 
+    /**
+     * URL-фрагмент внутри текста — для изоляции от нормализации запятых.
+     */
+    private static final Pattern URL_IN_TEXT =
+            Pattern.compile("https?://\\S+");
+
     private static final Pattern SPACED_NUMBER =
             Pattern.compile("\\b\\d{1,3}(?:[\\s\\u00A0]\\d{3})+\\b");
+
+    /**
+     * Query-параметр `name=value` — для точечного вырезания параметра целиком.
+     */
+    private static final Pattern QUERY_PARAM =
+            Pattern.compile("([?&][a-zA-Z0-9_\\-]+)=([^&\\s\"'`]*)");
 
     private static final String NEUTRAL_EXPECTED_RESULT =
             "Поведение соответствует требованиям (см. уточнение)";
     private static final String NEUTRAL_STEP_SUFFIX =
             "(точное поведение уточняется)";
+    private static final String NEUTRAL_NUMBER =
+            "[значение из ответа на уточнение]";
 
     private final OpenRouterClient openRouter;
     private final ObjectMapper mapper;
@@ -123,7 +137,6 @@ public class SyncGenerationService {
 
             List<Clarification> merged = new ArrayList<>(modelClarifications);
             merged.addAll(groundingClarifications);
-
             List<Clarification> deduped = dedupeClarifications(merged);
 
             return new GenerationResult(sanitized, deduped);
@@ -232,10 +245,13 @@ public class SyncGenerationService {
                     ? null
                     : requirementText.toLowerCase(Locale.ROOT);
 
+            boolean isNegative = "NEGATIVE".equalsIgnoreCase(nullSafe(tc.type()));
+
             Set<String> ungrounded = new LinkedHashSet<>();
 
             String sanitizedExpected = sanitizeText(
-                    nullSafe(tc.expectedResult()), docLower, refLower, answersLower, ungrounded);
+                    nullSafe(tc.expectedResult()), docLower, refLower, answersLower,
+                    ungrounded, /*isStep*/ false, isNegative, tc.type());
             if (sanitizedExpected.isBlank()) {
                 sanitizedExpected = NEUTRAL_EXPECTED_RESULT;
             }
@@ -243,8 +259,12 @@ public class SyncGenerationService {
             List<String> sanitizedSteps = new ArrayList<>();
             if (tc.steps() != null) {
                 for (String step : tc.steps()) {
-                    String sanitized = sanitizeText(
-                            nullSafe(step), docLower, refLower, answersLower, ungrounded);
+                    // FIX (баг 5, 6): в NEGATIVE-шагах числа — это тестовые данные,
+                    // их нельзя вырезать, иначе latitude=100 превращается в latitude=.
+                    String sanitized = isNegative
+                            ? nullSafe(step)
+                            : sanitizeText(nullSafe(step), docLower, refLower, answersLower,
+                            ungrounded, /*isStep*/ true, false, tc.type());
                     if (sanitized.isBlank()) {
                         sanitized = NEUTRAL_STEP_SUFFIX.trim();
                     }
@@ -275,66 +295,188 @@ public class SyncGenerationService {
     }
 
     private String sanitizeText(String text, String docLower, String refLower,
-                                String answersLower, Set<String> ungrounded) {
+                                String answersLower, Set<String> ungrounded,
+                                boolean isStep, boolean isNegative, String type) {
         if (text.isBlank()) {
             return text;
         }
         String out = text;
 
+        // FIX (баг 3): сначала выделяем URL-фрагменты, чтобы нормализация запятых
+        // не превращала latitude=52.52,48.85 в latitude=52.52, 48.85.
+        List<String> protectedUrls = new ArrayList<>();
+        Matcher urlM = URL_IN_TEXT.matcher(out);
+        StringBuilder withPlaceholders = new StringBuilder();
+        int last = 0;
+        while (urlM.find()) {
+            withPlaceholders.append(out, last, urlM.start());
+            withPlaceholders.append("__URL_").append(protectedUrls.size()).append("__");
+            protectedUrls.add(urlM.group());
+            last = urlM.end();
+        }
+        withPlaceholders.append(out.substring(last));
+        String working = withPlaceholders.toString();
+
+        // FIX (баг 4): вырезаем query-параметр целиком, если значение ungrounded.
+        working = stripUngroundedQueryParams(working, docLower, refLower, answersLower, ungrounded);
+
         // HTTP-коды
-        // FIX: создаём финальную копию для использования в лямбда-выражении
-        final String currentOut1 = out;
-        out = replaceUngrounded(out, CONCRETE_HTTP_CODE, 1, docLower, refLower, answersLower,
+        final String currentOut1 = working;
+        working = replaceUngrounded(working, CONCRETE_HTTP_CODE, 1, docLower, refLower, answersLower,
                 ungrounded,
                 token -> "HTTP " + token,
                 token -> HTTP_CODE_WHITELIST.contains(token) || isGroundedHttpContext(currentOut1, token));
 
         // snake_case-поля
-        out = replaceUngrounded(out, CONCRETE_FIELD_NAME, 1, docLower, refLower, answersLower,
+        working = replaceUngrounded(working, CONCRETE_FIELD_NAME, 1, docLower, refLower, answersLower,
                 ungrounded,
                 token -> "поле '" + token + "'",
                 FIELD_NAME_WHITELIST::contains);
 
-        // Числа: 3+ цифр + числа с пробелами (10 000)
-        out = replaceUngrounded(out, CONCRETE_NUMBER_LIMIT, 1, docLower, refLower, answersLower,
+        // Числа: 3+ цифр
+        // FIX (баг 1, 6): для чисел заменяем на NEUTRAL_NUMBER, а не пустоту,
+        // чтобы не получалось "равно ," / "- до". И grounding с арифметическими производными.
+        working = replaceUngrounded(working, CONCRETE_NUMBER_LIMIT, 1, docLower, refLower, answersLower,
                 ungrounded,
                 token -> "число " + token,
-                token -> false);
+                token -> isArithmeticDerivative(token, docLower, refLower, answersLower),
+                NEUTRAL_NUMBER);
 
-        // Числа с пробелом нормализуем к слитному виду для проверки заземления
-        out = replaceUngroundedNormalized(out, SPACED_NUMBER, docLower, refLower, answersLower,
-                ungrounded, token -> "число " + token);
+        // Числа с пробелом
+        working = replaceUngroundedNormalized(working, SPACED_NUMBER, docLower, refLower, answersLower,
+                ungrounded, token -> "число " + token, NEUTRAL_NUMBER);
 
-        // Нормализацию пробелов применяем ТОЛЬКО если что-то вырезали
-        if (!ungrounded.isEmpty()) {
-            out = out.replaceAll("\\s*,\\s*", ", ")
-                    .replaceAll("\\s{2,}", " ")
-                    .replaceAll("\\s+([.,;:])", "$1")
-                    .replaceAll("^[\\s,;:]+", "")
-                    .replaceAll("[\\s,;:]+$", "")
-                    .trim();
+        // FIX (баг 8): UI-тексты проверяем по кавычкам «...» / "...".
+        if ("UI".equalsIgnoreCase(nullSafe(type))) {
+            working = sanitizeUiQuotes(working, docLower, refLower, answersLower, ungrounded);
         }
-        return out;
+
+        // Восстанавливаем URL
+        for (int i = 0; i < protectedUrls.size(); i++) {
+            working = working.replace("__URL_" + i + "__", protectedUrls.get(i));
+        }
+
+        if (!ungrounded.isEmpty()) {
+            working = normalizeSpacesOnlyOutsideUrls(working);
+        }
+        return working;
+    }
+
+    /**
+     * FIX (баг 4): `?models=unknown_model` → весь параметр вырезается,
+     * а не `?models=`. Иначе получается невалидный запрос.
+     */
+    private String stripUngroundedQueryParams(String text, String docLower, String refLower,
+                                              String answersLower, Set<String> ungrounded) {
+        Matcher m = QUERY_PARAM.matcher(text);
+        StringBuilder sb = new StringBuilder();
+        int last = 0;
+        boolean changed = false;
+        while (m.find()) {
+            String name = m.group(1);       // "?models" или "&models"
+            String value = m.group(2);
+            if (value == null || value.isBlank()) {
+                continue;
+            }
+            String valueLower = value.toLowerCase(Locale.ROOT);
+            boolean grounded = containsToken(docLower, valueLower)
+                    || containsToken(refLower, valueLower)
+                    || (answersLower != null && containsToken(answersLower, valueLower));
+            if (grounded) {
+                continue;
+            }
+            ungrounded.add("параметр " + name.substring(1) + "=" + value);
+            sb.append(text, last, m.start());
+            last = m.end();
+            changed = true;
+        }
+        if (!changed) return text;
+        sb.append(text.substring(last));
+        return sb.toString();
+    }
+
+    /**
+     * FIX (баг 1): число grounded, если оно есть в документе ИЛИ является
+     * производным (N*24, N*7, N*60) от числа, которое есть в документе.
+     */
+    private boolean isArithmeticDerivative(String token, String docLower, String refLower,
+                                           String answersLower) {
+        if (containsToken(docLower, token)
+                || containsToken(refLower, token)
+                || (answersLower != null && containsToken(answersLower, token))) {
+            return true;
+        }
+        try {
+            long n = Long.parseLong(token);
+            for (long base : new long[]{n / 24, n / 7, n / 60}) {
+                if (base <= 0) continue;
+                if (base * 24 == n || base * 7 == n || base * 60 == n) {
+                    String b = Long.toString(base);
+                    if (containsToken(docLower, b)
+                            || containsToken(refLower, b)
+                            || (answersLower != null && containsToken(answersLower, b))) {
+                        return true;
+                    }
+                }
+            }
+        } catch (NumberFormatException ignored) {
+        }
+        return false;
+    }
+
+    /**
+     * FIX (баг 8): в UI-кейсах оставляем только цитаты в «...» / "...",
+     * которые реально есть в документе. Остальной свободный текст — вырезаем.
+     */
+    private String sanitizeUiQuotes(String text, String docLower, String refLower,
+                                    String answersLower, Set<String> ungrounded) {
+        Pattern quote = Pattern.compile("[«\"]([^»\"]{2,200})[»\"]");
+        Matcher m = quote.matcher(text);
+        StringBuilder sb = new StringBuilder();
+        int last = 0;
+        while (m.find()) {
+            sb.append(text, last, m.start());
+            String quoted = m.group(1);
+            String qLower = quoted.toLowerCase(Locale.ROOT);
+            boolean grounded = docLower.contains(qLower)
+                    || (refLower != null && refLower.contains(qLower))
+                    || (answersLower != null && answersLower.contains(qLower));
+            if (grounded) {
+                sb.append(m.group());
+            } else {
+                ungrounded.add("цитата «" + quoted + "»");
+                sb.append("«…»");
+            }
+            last = m.end();
+        }
+        sb.append(text.substring(last));
+        return sb.toString();
     }
 
     private boolean isGroundedHttpContext(String text, String code) {
+        // FIX (баг 7): «HTTP NNN» без предлога тоже считается grounded.
         Pattern p = Pattern.compile(
-                "(?i)(?:http|статус|status|ошибк|error|ответ|response|код).{0,40}\\b"
+                "(?i)(?:HTTP\\s*|(?:http|статус|status|ошибк|error|ответ|response|код).{0,40}\\b)"
                         + Pattern.quote(code) + "\\b|\\b" + Pattern.quote(code)
                         + "\\b.{0,40}(?:http|статус|status|ошибк|error|ответ|response|код)");
         return p.matcher(text).find();
     }
 
     private String replaceUngrounded(
-            String text,
-            Pattern pattern,
-            int group,
-            String docLower,
-            String refLower,
-            String answersLower,
-            Set<String> ungrounded,
+            String text, Pattern pattern, int group, String docLower, String refLower,
+            String answersLower, Set<String> ungrounded,
             java.util.function.Function<String, String> description,
             java.util.function.Predicate<String> whitelist) {
+        return replaceUngrounded(text, pattern, group, docLower, refLower, answersLower,
+                ungrounded, description, whitelist, "");
+    }
+
+    private String replaceUngrounded(
+            String text, Pattern pattern, int group, String docLower, String refLower,
+            String answersLower, Set<String> ungrounded,
+            java.util.function.Function<String, String> description,
+            java.util.function.Predicate<String> whitelist,
+            String replacement) {
 
         Matcher m = pattern.matcher(text);
         StringBuilder sb = new StringBuilder();
@@ -352,6 +494,9 @@ public class SyncGenerationService {
             }
             ungrounded.add(description.apply(token));
             sb.append(text, last, m.start());
+            if (replacement != null && !replacement.isEmpty()) {
+                sb.append(replacement);
+            }
             last = m.end();
             changed = true;
         }
@@ -363,13 +508,10 @@ public class SyncGenerationService {
     }
 
     private String replaceUngroundedNormalized(
-            String text,
-            Pattern pattern,
-            String docLower,
-            String refLower,
-            String answersLower,
-            Set<String> ungrounded,
-            java.util.function.Function<String, String> description) {
+            String text, Pattern pattern, String docLower, String refLower,
+            String answersLower, Set<String> ungrounded,
+            java.util.function.Function<String, String> description,
+            String replacement) {
 
         Matcher m = pattern.matcher(text);
         StringBuilder sb = new StringBuilder();
@@ -387,6 +529,9 @@ public class SyncGenerationService {
             }
             ungrounded.add(description.apply(token));
             sb.append(text, last, m.start());
+            if (replacement != null && !replacement.isEmpty()) {
+                sb.append(replacement);
+            }
             last = m.end();
             changed = true;
         }
@@ -395,6 +540,33 @@ public class SyncGenerationService {
         }
         sb.append(text.substring(last));
         return sb.toString();
+    }
+
+    /**
+     * FIX (баг 3): нормализуем запятые и пробелы ТОЛЬКО вне URL-фрагментов.
+     */
+    private String normalizeSpacesOnlyOutsideUrls(String text) {
+        Matcher m = URL_IN_TEXT.matcher(text);
+        StringBuilder sb = new StringBuilder();
+        int last = 0;
+        while (m.find()) {
+            String plain = text.substring(last, m.start());
+            sb.append(plain.replaceAll("\\s*,\\s*", ", ")
+                    .replaceAll("\\s{2,}", " ")
+                    .replaceAll("\\s+([.,;:])", "$1")
+                    .replaceAll("^[\\s,;:]+", "")
+                    .replaceAll("[\\s,;:]+$", ""));
+            sb.append(m.group());
+            last = m.end();
+        }
+        String tail = text.substring(last)
+                .replaceAll("\\s*,\\s*", ", ")
+                .replaceAll("\\s{2,}", " ")
+                .replaceAll("\\s+([.,;:])", "$1")
+                .replaceAll("^[\\s,;:]+", "")
+                .replaceAll("[\\s,;:]+$", "");
+        sb.append(tail);
+        return sb.toString().trim();
     }
 
     private String extractRequirementBlock(String markdown, String ref) {
@@ -494,6 +666,20 @@ public class SyncGenerationService {
         while (m.find()) {
             numbers.add(m.group().replaceAll("[\\s\\u00A0]", ""));
         }
+
+        // FIX (баг 1): добавляем арифметические производные, чтобы 168 (=7*24)
+        // считалось grounded, если в документе есть 7.
+        Set<String> derived = new TreeSet<>();
+        for (String n : new ArrayList<>(numbers)) {
+            try {
+                long v = Long.parseLong(n);
+                derived.add(Long.toString(v * 24));
+                derived.add(Long.toString(v * 7));
+                derived.add(Long.toString(v * 60));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        numbers.addAll(derived);
 
         StringBuilder sb = new StringBuilder();
         sb.append("- URL: ").append(urls.isEmpty() ? "(нет)" : urls).append('\n');

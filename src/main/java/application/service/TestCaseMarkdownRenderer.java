@@ -7,6 +7,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 @Service
 public class TestCaseMarkdownRenderer {
@@ -82,6 +83,64 @@ public class TestCaseMarkdownRenderer {
         return sb.toString();
     }
 
+    /**
+     * FIX (index desync): рендерит _index.md по РЕАЛЬНЫМ именам сохранённых файлов.
+     *
+     * @param testCases      список тест-кейсов (для порядка и метаданных)
+     * @param clarifications уточнения (для секции ⚠️)
+     * @param savedById      карта testCaseId → SavedFile (реальное имя + url)
+     * @param clarFilename   реальное имя _clarifications.md (или null)
+     */
+    public String renderIndexFromSaved(List<TestCase> testCases,
+                                       List<Clarification> clarifications,
+                                       Map<String, TestStorageService.SavedFile> savedById,
+                                       String clarFilename) {
+        StringBuilder sb = new StringBuilder("# Тест-кейсы — индекс\n\n");
+        if (testCases != null) {
+            for (TestCase tc : testCases) {
+                var saved = savedById.get(tc.id());
+                String filename = saved != null ? saved.filename() : fileNameFor(tc);
+                sb.append("- [").append(nullSafe(tc.id())).append("](./")
+                        .append(filename).append(") — ")
+                        .append(nullSafe(tc.title()))
+                        .append(" (`").append(nullSafe(tc.type())).append("`, ")
+                        .append(nullSafe(tc.priority())).append(")\n");
+            }
+        }
+        if (clarFilename != null) {
+            sb.append("\n## ⚠️ Уточнения\n\n");
+            sb.append("- [Уточнения](./").append(clarFilename).append(")\n");
+            if (clarifications != null) {
+                for (Clarification c : clarifications) {
+                    if (c.type() != null && c.type() == ClarificationType.UNGROUNDED_ASSUMPTION) {
+                        continue;
+                    }
+                    sb.append("- ").append(nullSafe(c.requirementRef())).append(": ")
+                            .append(nullSafe(c.question())).append("\n");
+                }
+            }
+        } else if (clarifications != null && !clarifications.isEmpty()) {
+            long missing = clarifications.stream()
+                    .filter(c -> c.type() == null || c.type() == ClarificationType.MISSING_REQUIREMENT)
+                    .count();
+            if (missing > 0) {
+                sb.append("\n## ⚠️ Уточнения\n\n");
+                for (Clarification c : clarifications) {
+                    if (c.type() != null && c.type() == ClarificationType.UNGROUNDED_ASSUMPTION) {
+                        continue;
+                    }
+                    sb.append("- ").append(nullSafe(c.requirementRef())).append(": ")
+                            .append(nullSafe(c.question())).append("\n");
+                }
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * @deprecated используйте {@link #renderIndexFromSaved} — старый метод даёт рассинхрон с диском.
+     */
+    @Deprecated
     public String renderIndex(List<TestCase> testCases, List<Clarification> clarifications) {
         StringBuilder sb = new StringBuilder("# Тест-кейсы — индекс\n\n");
         if (testCases != null) {

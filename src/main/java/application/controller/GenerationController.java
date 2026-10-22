@@ -34,7 +34,7 @@ public class GenerationController {
         String taskId = UUID.randomUUID().toString();
 
         String prefix = sanitizePrefix(request.filename());
-        List<GeneratedFile> files = persist(result.testCases(), result.clarifications(), prefix);
+        PersistResult persisted = persist(result.testCases(), result.clarifications(), prefix);
         String status = hasMissingRequirements(result.clarifications())
                 ? "NEEDS_CLARIFICATION" : "DONE";
 
@@ -48,7 +48,7 @@ public class GenerationController {
         }
 
         return ResponseEntity.ok(new GenerateResponse(taskId, status,
-                result.testCases(), result.clarifications(), files));
+                result.testCases(), result.clarifications(), persisted.files()));
     }
 
     @PostMapping("/{taskId}/answers")
@@ -64,7 +64,7 @@ public class GenerationController {
             var result = generationService.answer(
                     session.markdown(), session.testCasesJson(), answersJson);
 
-            List<GeneratedFile> files = persist(result.testCases(), result.clarifications(),
+            PersistResult persisted = persist(result.testCases(), result.clarifications(),
                     session.filenamePrefix());
             String status = hasMissingRequirements(result.clarifications())
                     ? "NEEDS_CLARIFICATION" : "DONE";
@@ -77,7 +77,7 @@ public class GenerationController {
             }
 
             return ResponseEntity.ok(new GenerateResponse(taskId, status,
-                    result.testCases(), result.clarifications(), files));
+                    result.testCases(), result.clarifications(), persisted.files()));
         } catch (IllegalArgumentException e) {
             throw e;
         } catch (Exception e) {
@@ -102,14 +102,26 @@ public class GenerationController {
         throw new IllegalArgumentException("Нужно передать либо markdown, либо pdfToMdUrl");
     }
 
-    private List<GeneratedFile> persist(List<TestCase> testCases,
-                                        List<Clarification> clarifications,
-                                        String prefix) {
+    /**
+     * Результат persist: files[] + data для _index.md.
+     */
+    private record PersistResult(List<GeneratedFile> files) {
+    }
+
+    /**
+     * FIX (index desync): _index.md строится из РЕАЛЬНЫХ имён сохранённых файлов,
+     * а не из fileNameFor(tc). Иначе при коллизии имён (TC-X.md уже есть)
+     * storage переименует файл в TC-X_2.md, а индекс продолжит ссылаться на TC-X.md.
+     */
+    private PersistResult persist(List<TestCase> testCases,
+                                  List<Clarification> clarifications,
+                                  String prefix) {
         List<TestStorageService.PendingFile> pending = new ArrayList<>();
         List<String> ids = new ArrayList<>();
+        // Для индекса: testCaseId → реальное имя файла (заполняется после saveAll)
+        LinkedHashMap<String, TestCase> idToTc = new LinkedHashMap<>();
+        List<String> pendingIds = new ArrayList<>();
 
-        // FIX: дедуп файлов по (filename) — если два кейса дают одинаковое имя,
-        // второй переименовывается в ..._1.md, ..._2.md.
         Map<String, Integer> nameCount = new HashMap<>();
 
         if (testCases != null) {
@@ -122,31 +134,56 @@ public class GenerationController {
                 String uniqueName = uniquify(baseName, nameCount);
                 pending.add(new TestStorageService.PendingFile(
                         uniqueName, renderer.render(tc, clarifications)));
-                ids.add(tc.id());
+                pendingIds.add(tc.id());
+                idToTc.put(tc.id(), tc);
             }
         }
+
         boolean hasMissing = clarifications != null && clarifications.stream()
                 .anyMatch(c -> c.type() == null || c.type() == ClarificationType.MISSING_REQUIREMENT);
+        String clarFilename = null;
         if (hasMissing) {
-            String clarName = uniquify(prefix + "_clarifications.md", nameCount);
+            clarFilename = uniquify(prefix + "_clarifications.md", nameCount);
             pending.add(new TestStorageService.PendingFile(
-                    clarName, renderer.renderClarifications(clarifications)));
-            ids.add("_clarifications");
-        }
-        if (testCases != null && !testCases.isEmpty()) {
-            String idxName = uniquify(prefix + "_index.md", nameCount);
-            pending.add(new TestStorageService.PendingFile(
-                    idxName, renderer.renderIndex(testCases, clarifications)));
-            ids.add("_index");
+                    clarFilename, renderer.renderClarifications(clarifications)));
         }
 
+        // Сначала сохраняем testCases + clarifications, чтобы получить реальные имена.
         var saved = storage.saveAll(pending);
-        List<GeneratedFile> files = new ArrayList<>(saved.size());
-        for (int i = 0; i < saved.size(); i++) {
-            var s = saved.get(i);
-            files.add(new GeneratedFile(ids.get(i), s.filename(), s.downloadUrl()));
+
+        // Собираем карту testCaseId → SavedFile по реальным именам.
+        Map<String, TestStorageService.SavedFile> savedById = new LinkedHashMap<>();
+        for (int i = 0; i < pendingIds.size(); i++) {
+            savedById.put(pendingIds.get(i), saved.get(i));
         }
-        return files;
+
+        // Теперь рендерим индекс из РЕАЛЬНЫХ имён и сохраняем отдельно.
+        List<GeneratedFile> files = new ArrayList<>(saved.size() + 1);
+        for (var sf : saved) {
+            files.add(new GeneratedFile(
+                    matchId(sf.filename(), pendingIds, savedById),
+                    sf.filename(), sf.downloadUrl()));
+        }
+
+        if (testCases != null && !testCases.isEmpty()) {
+            String idxName = uniquify(prefix + "_index.md", nameCount);
+            String indexMd = renderer.renderIndexFromSaved(testCases, clarifications,
+                    savedById, clarFilename);
+            var idxSaved = storage.save(idxName, indexMd);
+            files.add(new GeneratedFile("_index", idxSaved.filename(), idxSaved.downloadUrl()));
+        }
+
+        return new PersistResult(files);
+    }
+
+    private String matchId(String filename,
+                           List<String> pendingIds,
+                           Map<String, TestStorageService.SavedFile> savedById) {
+        for (var e : savedById.entrySet()) {
+            if (e.getValue().filename().equals(filename)) return e.getKey();
+        }
+        if (filename.endsWith("_clarifications.md")) return "_clarifications";
+        return "_index";
     }
 
     private String uniquify(String base, Map<String, Integer> nameCount) {
