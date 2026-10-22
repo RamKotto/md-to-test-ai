@@ -22,6 +22,10 @@ public class OpenRouterClient {
     public OpenRouterClient(OpenRouterProperties props, RestClient openRouterRestClient) {
         this.props = props;
         this.http = openRouterRestClient;
+        // IMPROVEMENT: явная проверка ключа с понятным сообщением
+        if (props.getApiKey() == null || props.getApiKey().isBlank()) {
+            log.warn("openrouter.api-key не задан — запросы к OpenRouter будут падать");
+        }
     }
 
     @SuppressWarnings("unchecked")
@@ -46,6 +50,11 @@ public class OpenRouterClient {
 
             if (response == null) {
                 throw new GenerationException("Пустой ответ от OpenRouter");
+            }
+            // IMPROVEMENT: логируем usage для диагностики
+            Object usage = response.get("usage");
+            if (usage != null) {
+                log.debug("OpenRouter usage: {}", usage);
             }
             var choices = (List<Map<String, Object>>) response.get("choices");
             if (choices == null || choices.isEmpty()) {

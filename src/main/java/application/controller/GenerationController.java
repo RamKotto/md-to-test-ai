@@ -85,10 +85,6 @@ public class GenerationController {
         }
     }
 
-    /**
-     * NEEDS_CLARIFICATION только если есть настоящие вопросы пользователю.
-     * type==null трактуем как MISSING_REQUIREMENT (на случай старых сессий).
-     */
     private boolean hasMissingRequirements(List<Clarification> clarifications) {
         if (clarifications == null || clarifications.isEmpty()) return false;
         return clarifications.stream()
@@ -112,30 +108,35 @@ public class GenerationController {
         List<TestStorageService.PendingFile> pending = new ArrayList<>();
         List<String> ids = new ArrayList<>();
 
+        // FIX: дедуп файлов по (filename) — если два кейса дают одинаковое имя,
+        // второй переименовывается в ..._1.md, ..._2.md.
+        Map<String, Integer> nameCount = new HashMap<>();
+
         if (testCases != null) {
             Set<String> seenIds = new HashSet<>();
             for (TestCase tc : testCases) {
                 if (!seenIds.add(tc.id())) {
-                    log.warn("Дубликат id тест-кейса, файл будет переименован: {}", tc.id());
+                    log.warn("Дубликат id тест-кейса: {}", tc.id());
                 }
+                String baseName = prefix + renderer.fileNameFor(tc);
+                String uniqueName = uniquify(baseName, nameCount);
                 pending.add(new TestStorageService.PendingFile(
-                        prefix + renderer.fileNameFor(tc),
-                        renderer.render(tc, clarifications)));
+                        uniqueName, renderer.render(tc, clarifications)));
                 ids.add(tc.id());
             }
         }
         boolean hasMissing = clarifications != null && clarifications.stream()
                 .anyMatch(c -> c.type() == null || c.type() == ClarificationType.MISSING_REQUIREMENT);
         if (hasMissing) {
+            String clarName = uniquify(prefix + "_clarifications.md", nameCount);
             pending.add(new TestStorageService.PendingFile(
-                    prefix + "_clarifications.md",
-                    renderer.renderClarifications(clarifications)));
+                    clarName, renderer.renderClarifications(clarifications)));
             ids.add("_clarifications");
         }
         if (testCases != null && !testCases.isEmpty()) {
+            String idxName = uniquify(prefix + "_index.md", nameCount);
             pending.add(new TestStorageService.PendingFile(
-                    prefix + "_index.md",
-                    renderer.renderIndex(testCases, clarifications)));
+                    idxName, renderer.renderIndex(testCases, clarifications)));
             ids.add("_index");
         }
 
@@ -148,10 +149,14 @@ public class GenerationController {
         return files;
     }
 
-    /**
-     * Приводит filename к безопасному префиксу для имени файла.
-     * "swagger.yaml" -> "swagger_", "" / null -> "".
-     */
+    private String uniquify(String base, Map<String, Integer> nameCount) {
+        int n = nameCount.merge(base, 1, Integer::sum);
+        if (n == 1) return base;
+        int dot = base.lastIndexOf('.');
+        if (dot < 0) return base + "_" + (n - 1);
+        return base.substring(0, dot) + "_" + (n - 1) + base.substring(dot);
+    }
+
     private String sanitizePrefix(String filename) {
         if (filename == null || filename.isBlank()) return "";
         String base = filename;

@@ -2,6 +2,7 @@ package application.config;
 
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Pattern;
 import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
@@ -12,6 +13,7 @@ import org.springframework.validation.annotation.Validated;
 public class OpenRouterProperties {
 
     @NotBlank
+    @Pattern(regexp = "^https?://.+", message = "openrouter.base-url должен быть http(s)-URL")
     private String baseUrl = "https://openrouter.ai/api/v1";
 
     @NotBlank

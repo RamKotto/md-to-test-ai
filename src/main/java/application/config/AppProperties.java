@@ -3,6 +3,7 @@ package application.config;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Pattern;
 import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
@@ -31,13 +32,16 @@ public class AppProperties {
     @Data
     public static class Storage {
         private Path directory = Path.of("./data/tests");
+        // IMPROVEMENT: baseUrl должен быть реальным http(s)-URL
         @NotBlank
+        @Pattern(regexp = "^https?://.+", message = "storage.base-url должен быть http(s)-URL")
         private String baseUrl = "http://localhost:8082";
     }
 
     @Data
     public static class PdfToMd {
         @NotBlank
+        @Pattern(regexp = "^https?://.+", message = "pdf-to-md.base-url должен быть http(s)-URL")
         private String baseUrl = "http://localhost:8080";
         @Min(1)
         private int connectTimeoutSeconds = 10;

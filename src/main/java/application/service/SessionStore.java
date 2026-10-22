@@ -36,7 +36,8 @@ public class SessionStore {
                     .min(Comparator.comparing(e -> e.getValue().createdAt()))
                     .ifPresent(e -> sessions.remove(e.getKey()));
         }
-        sessions.put(taskId, new Session(markdown, testCasesJson, filenamePrefix == null ? "" : filenamePrefix, Instant.now()));
+        sessions.put(taskId, new Session(markdown, testCasesJson,
+                filenamePrefix == null ? "" : filenamePrefix, Instant.now()));
     }
 
     public Session get(String taskId) {
