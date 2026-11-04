@@ -11,6 +11,13 @@ import java.net.URI;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+/**
+ * Клиент для скачивания Markdown-документа из сервиса pdf-to-md по абсолютному URL.
+ * <p>
+ * Защита от SSRF: схема URL должна быть {@code http} или {@code https}, хост должен входить в
+ * allowlist. Allowlist берётся из {@code app.pdf-to-md.allowed-hosts}; если список пуст, используется
+ * хост из {@code app.pdf-to-md.base-url}. Порт и путь не проверяются.
+ */
 @Slf4j
 @Service
 public class PdfToMdClient {
@@ -18,6 +25,15 @@ public class PdfToMdClient {
     private final RestClient http;
     private final Set<String> allowedHosts;
 
+    /**
+     * Создаёт клиент и вычисляет allowlist хостов в нижнем регистре.
+     * <p>
+     * Значения {@code allowed-hosts} приводятся к нижнему регистру и очищаются от пробелов по краям.
+     * Список логируется на уровне INFO.
+     *
+     * @param pdfToMdRestClient клиент pdf-to-md с таймаутами, см. {@code HttpConfig}
+     * @param appProps          настройки приложения, включая {@code app.pdf-to-md}
+     */
     public PdfToMdClient(RestClient pdfToMdRestClient, AppProperties appProps) {
         this.http = pdfToMdRestClient;
         var configured = appProps.getPdfToMd().getAllowedHosts();
@@ -32,6 +48,19 @@ public class PdfToMdClient {
         log.info("PdfToMdClient: разрешённые хосты = {}", allowedHosts);
     }
 
+    /**
+     * Скачивает Markdown по абсолютному URL.
+     * <p>
+     * URL проверяется методом {@link #validateUrl} до запроса. Content-Type ответа сравнивается
+     * с {@code text/markdown}, {@code text/plain} и {@code application/octet-stream}. При несовпадении
+     * пишется предупреждение, но ответ принимается. Пустое тело отклоняется.
+     *
+     * @param absoluteUrl абсолютный http(s)-URL на {@code .md}, разрешённый по allowlist
+     * @return текст Markdown без изменений
+     * @throws IllegalArgumentException   если URL пустой, неверного формата, не http(s) или хост не разрешён
+     *                                    (ответ {@code 400})
+     * @throws PdfToMdClientException     если запрос завершился ошибкой, либо тело пусто (ответ {@code 502})
+     */
     public String fetchMarkdown(String absoluteUrl) {
         URI uri = validateUrl(absoluteUrl);
         log.info("Скачивание Markdown из pdf-to-md: {}", uri);
@@ -60,6 +89,15 @@ public class PdfToMdClient {
         }
     }
 
+    /**
+     * Проверяет URL перед запросом: непустой, корректный, схема {@code http} или {@code https}
+     * (без учёта регистра) и хост входит в allowlist (сравнение без учёта регистра).
+     *
+     * @param raw исходная строка URL
+     * @return разобранный {@link URI}
+     * @throws IllegalArgumentException если любая проверка не пройдена; сообщение содержит причину
+     *                                  и, для хоста, список разрешённых хостов
+     */
     private URI validateUrl(String raw) {
         if (raw == null || raw.isBlank()) {
             throw new IllegalArgumentException("pdfToMdUrl обязателен");

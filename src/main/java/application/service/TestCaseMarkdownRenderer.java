@@ -9,9 +9,27 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * Рендер Markdown-файлов прогона: отдельный файл на тест-кейс, {@code _clarifications.md} и
+ * {@code _index.md}. Класс без состояния.
+ * <p>
+ * Уточнения типа {@code UNGROUNDED_ASSUMPTION} в файлах не выводятся: они попадают только в JSON-ответ API.
+ */
 @Service
 public class TestCaseMarkdownRenderer {
 
+    /**
+     * Рендерит файл одного тест-кейса: заголовок, метаданные, блок уточнений для его требования,
+     * предусловия, шаги и ожидаемый результат.
+     * <p>
+     * Блок уточнений выводится для уточнений с тем же {@code requirementRef}, что и у тест-кейса,
+     * и с типом {@code MISSING_REQUIREMENT} или без типа. Пустой список шагов заменяется заглушкой.
+     * {@code null} в полях выводится как пустая строка.
+     *
+     * @param tc               тест-кейс
+     * @param allClarifications все уточнения прогона
+     * @return текст Markdown
+     */
     public String render(TestCase tc, List<Clarification> allClarifications) {
         StringBuilder sb = new StringBuilder();
         sb.append("# ").append(nullSafe(tc.id())).append(" — ").append(nullSafe(tc.title())).append("\n\n");
@@ -61,6 +79,13 @@ public class TestCaseMarkdownRenderer {
         return sb.toString();
     }
 
+    /**
+     * Рендерит файл {@code _clarifications.md}: по разделу на каждое уточнение, кроме
+     * {@code UNGROUNDED_ASSUMPTION}. Если видимых уточнений нет, выводится строка «Уточнений нет».
+     *
+     * @param clarifications уточнения прогона; может быть {@code null}
+     * @return текст Markdown
+     */
     public String renderClarifications(List<Clarification> clarifications) {
         StringBuilder sb = new StringBuilder("# Уточнения\n\n");
         if (clarifications == null || clarifications.isEmpty()) {
@@ -84,22 +109,28 @@ public class TestCaseMarkdownRenderer {
     }
 
     /**
-     * FIX (index desync): рендерит _index.md по РЕАЛЬНЫМ именам сохранённых файлов.
+     * Рендерит {@code _index.md} по фактически сохранённым именам файлов.
+     * <p>
+     * Каждая строка содержит ссылку на файл тест-кейса (берётся из {@code filenameById}; если id
+     * там нет, имя строится через {@link #fileNameFor}), заголовок, тип и приоритет. Если передан
+     * {@code clarFilename}, добавляется раздел «⚠️ Уточнения» со ссылкой на файл уточнений и
+     * списком уточнений, кроме {@code UNGROUNDED_ASSUMPTION}. Без файла уточнений раздел выводится
+     * только при наличии уточнений типа {@code MISSING_REQUIREMENT} или без типа.
      *
-     * @param testCases      список тест-кейсов (для порядка и метаданных)
-     * @param clarifications уточнения (для секции ⚠️)
-     * @param savedById      карта testCaseId → SavedFile (реальное имя + url)
-     * @param clarFilename   реальное имя _clarifications.md (или null)
+     * @param testCases      тест-кейсы в порядке вывода; может быть {@code null}
+     * @param clarifications уточнения прогона; может быть {@code null}
+     * @param filenameById   id тест-кейса → реальное имя файла на диске
+     * @param clarFilename   реальное имя {@code _clarifications.md} или {@code null}, если файла нет
+     * @return текст Markdown
      */
     public String renderIndexFromSaved(List<TestCase> testCases,
                                        List<Clarification> clarifications,
-                                       Map<String, TestStorageService.SavedFile> savedById,
+                                       Map<String, String> filenameById,
                                        String clarFilename) {
         StringBuilder sb = new StringBuilder("# Тест-кейсы — индекс\n\n");
         if (testCases != null) {
             for (TestCase tc : testCases) {
-                var saved = savedById.get(tc.id());
-                String filename = saved != null ? saved.filename() : fileNameFor(tc);
+                String filename = filenameById.getOrDefault(tc.id(), fileNameFor(tc));
                 sb.append("- [").append(nullSafe(tc.id())).append("](./")
                         .append(filename).append(") — ")
                         .append(nullSafe(tc.title()))
@@ -138,6 +169,13 @@ public class TestCaseMarkdownRenderer {
     }
 
     /**
+     * Старая версия {@link #renderIndexFromSaved}, которая строит имена файлов из тест-кейсов.
+     * Не учитывает уникализацию имён на диске и поэтому может давать ссылки на несуществующие файлы.
+     * Внутри модуля не вызывается.
+     *
+     * @param testCases      тест-кейсы
+     * @param clarifications уточнения прогона
+     * @return текст Markdown
      * @deprecated используйте {@link #renderIndexFromSaved} — старый метод даёт рассинхрон с диском.
      */
     @Deprecated
@@ -170,6 +208,17 @@ public class TestCaseMarkdownRenderer {
         return sb.toString();
     }
 
+    /**
+     * Строит имя файла тест-кейса в виде {@code <id>_<slug>.md}.
+     * <p>
+     * Id: символы вне {@code [a-zA-Z0-9_-]} заменяются на {@code _}; пустой id даёт {@code TC}.
+     * Slug: заголовок в нижнем регистре, всё, кроме латинских букв и цифр, заменяется на {@code _};
+     * лишние подчёркивания по краям убираются; ограничение 60 символов. Кириллица в slug не попадает,
+     * поэтому тест-кейс с заголовком только на русском получает slug {@code test_case}.
+     *
+     * @param tc тест-кейс
+     * @return имя файла без префикса прогона
+     */
     public String fileNameFor(TestCase tc) {
         String id = nullSafe(tc.id()).replaceAll("[^a-zA-Z0-9_\\-]", "_");
         if (id.isBlank()) id = "TC";
@@ -182,6 +231,14 @@ public class TestCaseMarkdownRenderer {
         return id + "_" + slug + ".md";
     }
 
+    /**
+     * Возвращает уточнения, относящиеся к тест-кейсу: с тем же {@code requirementRef}.
+     * Тип уточнения не учитывается. Если у тест-кейса ссылка пустая, возвращается пустой список.
+     *
+     * @param tc  тест-кейс
+     * @param all все уточнения прогона; может быть {@code null}
+     * @return новый список (возможно пустой), в порядке исходного списка
+     */
     public List<Clarification> relatedClarifications(TestCase tc, List<Clarification> all) {
         List<Clarification> result = new ArrayList<>();
         if (all == null || all.isEmpty()) return result;
@@ -194,6 +251,12 @@ public class TestCaseMarkdownRenderer {
         return result;
     }
 
+    /**
+     * Заменяет {@code null} на пустую строку.
+     *
+     * @param s исходная строка, может быть {@code null}
+     * @return {@code s} или пустая строка
+     */
     private String nullSafe(String s) {
         return s == null ? "" : s;
     }

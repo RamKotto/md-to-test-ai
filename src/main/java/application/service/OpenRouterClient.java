@@ -12,6 +12,14 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * Клиент OpenRouter Chat Completions API: единственная точка обмена с LLM в модуле.
+ * <p>
+ * Отправляет системный и пользовательский промпты на {@code /chat/completions} с
+ * {@code temperature = 0.0}, {@code max_tokens = openrouter.max-output-tokens} и
+ * {@code response_format = {"type": "json_object"}}. Повторных попыток нет: любой сбой сразу
+ * превращается в {@link GenerationException}.
+ */
 @Slf4j
 @Service
 public class OpenRouterClient {
@@ -19,15 +27,34 @@ public class OpenRouterClient {
     private final OpenRouterProperties props;
     private final RestClient http;
 
+    /**
+     * Создаёт клиент и проверяет наличие API-ключа. Пустой ключ дополнительно логируется
+     * предупреждением. Штатный запуск приложения отклоняет пустой ключ раньше, на этапе валидации
+     * {@link OpenRouterProperties}.
+     *
+     * @param props                настройки OpenRouter
+     * @param openRouterRestClient клиент с базовым URL и заголовками, см. {@code HttpConfig}
+     */
     public OpenRouterClient(OpenRouterProperties props, RestClient openRouterRestClient) {
         this.props = props;
         this.http = openRouterRestClient;
-        // IMPROVEMENT: явная проверка ключа с понятным сообщением
         if (props.getApiKey() == null || props.getApiKey().isBlank()) {
             log.warn("openrouter.api-key не задан — запросы к OpenRouter будут падать");
         }
     }
 
+    /**
+     * Выполняет запрос завершения чата и возвращает текст первого варианта ответа.
+     * <p>
+     * Usage логируется на уровне DEBUG, если его вернул OpenRouter. Текст тела HTTP-ошибки
+     * обрезается до 800 символов.
+     *
+     * @param systemPrompt системный промпт
+     * @param userText     пользовательский текст (документ и дополнительные данные)
+     * @return содержимое {@code choices[0].message.content}
+     * @throws GenerationException если ответ пустой, не содержит {@code choices} или {@code content},
+     *                             вернулся HTTP-статус ошибки, либо произошёл сетевой сбой или таймаут
+     */
     @SuppressWarnings("unchecked")
     public String complete(String systemPrompt, String userText) {
         Map<String, Object> body = new HashMap<>();
@@ -51,7 +78,6 @@ public class OpenRouterClient {
             if (response == null) {
                 throw new GenerationException("Пустой ответ от OpenRouter");
             }
-            // IMPROVEMENT: логируем usage для диагностики
             Object usage = response.get("usage");
             if (usage != null) {
                 log.debug("OpenRouter usage: {}", usage);
@@ -78,6 +104,13 @@ public class OpenRouterClient {
         }
     }
 
+    /**
+     * Обрезает строку до {@code max} символов и добавляет многоточие, если текст был длиннее.
+     *
+     * @param s   исходная строка, может быть {@code null}
+     * @param max максимальная длина без многоточия
+     * @return обрезанная строка, пустая строка для {@code null}
+     */
     private static String truncate(String s, int max) {
         if (s == null) return "";
         return s.length() <= max ? s : s.substring(0, max) + "…";
