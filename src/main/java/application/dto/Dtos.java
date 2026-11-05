@@ -1,6 +1,10 @@
 package application.dto;
 
+import com.fasterxml.jackson.databind.JsonNode;
+
+import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Контейнер DTO REST API сервиса в виде вложенных record-типов и enum.
@@ -33,30 +37,35 @@ public class Dtos {
         public boolean hasPdfToMdUrl() {
             return pdfToMdUrl != null && !pdfToMdUrl.isBlank();
         }
-
-        /**
-         * @return {@code true}, если {@code filename} задан и не состоит только из пробельных символов
-         */
-        public boolean hasFilename() {
-            return filename != null && !filename.isBlank();
-        }
     }
 
     /**
      * Тело запроса {@code POST /api/generate/{taskId}/answers}.
      *
-     * @param answers ответы пользователя на уточнения; список не валидируется
+     * @param answers         ответы пользователя; пустые ответы отбрасываются
+     * @param expectedVersion версия сессии, которую видел клиент; необязательна. Не равна текущей
+     *                        версии — ответ {@code 409}
      */
-    public record AnswerRequest(List<Answer> answers) {
+    public record AnswerRequest(List<Answer> answers, Integer expectedVersion) {
 
         /**
          * Ответ пользователя на одно уточнение.
          *
-         * @param requirementRef ссылка на требование, к которому относится ответ
-         * @param answer         текст ответа
+         * @param question   вопрос, на который дан ответ
+         * @param answer     текст ответа
+         * @param topicKey   ключ темы (пара topicKey + question задаёт уникальность ответа)
+         * @param testCaseId идентификатор тест-кейса, к которому относится ответ
          */
-        public record Answer(String requirementRef, String answer) {
+        public record Answer(String question, String answer, String topicKey, String testCaseId) {
         }
+    }
+
+    /**
+     * Тело запроса {@code PUT /api/generate/{taskId}/draft}.
+     *
+     * @param draft черновики ответов: индекс уточнения → текст
+     */
+    public record DraftRequest(Map<String, String> draft) {
     }
 
     /**
@@ -143,8 +152,8 @@ public class Dtos {
      * Описание записанного файла в ответе API.
      *
      * @param id          идентификатор: id тест-кейса, либо {@code _clarifications}, либо {@code _index}
-     * @param filename    имя файла на диске
-     * @param downloadUrl абсолютный URL для скачивания через {@code GET /api/files/{filename}}
+     * @param filename    имя файла
+     * @param downloadUrl абсолютный URL для скачивания через {@code GET /api/files/{uuid}}
      */
     public record GeneratedFile(String id, String filename, String downloadUrl) {
     }
@@ -157,13 +166,46 @@ public class Dtos {
      * @param testCases      тест-кейсы прогона
      * @param clarifications уточнения, включая санитайзерные ({@code UNGROUNDED_ASSUMPTION})
      * @param files          записанные файлы в порядке записи
+     * @param version        версия сессии (для генерации — 1, для ответов — уже увеличенная)
      */
     public record GenerateResponse(
             String taskId,
             String status,
             List<TestCase> testCases,
             List<Clarification> clarifications,
-            List<GeneratedFile> files
+            List<GeneratedFile> files,
+            Integer version
     ) {
+    }
+
+    /**
+     * Тело запроса {@code PUT /api/journal/{id}}. Полезная нагрузка сервером не разбирается.
+     *
+     * @param type       {@code convert}, {@code generate} или {@code run}
+     * @param title      заголовок записи
+     * @param status     статус или {@code null}
+     * @param taskId     taskId или {@code null}
+     * @param sourceName имя исходного документа или {@code null}
+     * @param createdAt  момент создания в ISO-8601 (с часовым поясом)
+     * @param payload    JSON-объект; {@code null} трактуется как {@code {}}
+     */
+    public record JournalEntryRequest(String type, String title, String status, String taskId,
+                                      String sourceName, String createdAt, JsonNode payload) {
+    }
+
+    /**
+     * Запись журнала в ответе API.
+     *
+     * @param id         идентификатор записи (UUID)
+     * @param type       тип записи
+     * @param title      заголовок
+     * @param status     статус или {@code null}
+     * @param taskId     taskId или {@code null}
+     * @param sourceName имя исходного документа или {@code null}
+     * @param createdAt  момент создания
+     * @param payload    полезная нагрузка (JSON-объект)
+     */
+    public record JournalEntry(String id, String type, String title, String status, String taskId,
+                               String sourceName, Instant createdAt, JsonNode payload) {
     }
 }

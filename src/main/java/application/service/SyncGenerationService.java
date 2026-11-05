@@ -38,7 +38,7 @@ public class SyncGenerationService {
             Set.of("P0", "P1", "P2", "P3");
 
     /**
-     * Допустимый формат id: {@code TC-<тип>-<номер от 3 цифр>}. Для типов допускаются и полные,
+     * Допустимый формат id: {@code TC-<тип>-<номер не короче 3 цифр>}. Для типов допускаются и полные,
      * и сокращённые имена: NEG, SEC, PERF.
      */
     private static final Pattern ID_PATTERN =
@@ -89,10 +89,15 @@ public class SyncGenerationService {
             Pattern.compile("\\b\\d{1,3}(?:[\\s\\u00A0]\\d{3})+\\b");
 
     /**
-     * Query-параметр вида {@code name=value} в URL. Вырезается целиком, если значение не обосновано.
+     * Query-параметр вида {@code name=value} (в том числе в относительном пути и внутри абсолютных URL).
+     * Вырезается целиком, если значение не обосновано.
      */
     private static final Pattern QUERY_PARAM =
             Pattern.compile("([?&][a-zA-Z0-9_\\-]+)=([^&\\s\"'`]*)");
+
+    /** Начало query-параметра без префикса {@code ?}/{@code &}; проверяет, что за {@code &} идёт параметр. */
+    private static final Pattern QUERY_PARAM_NEXT =
+            Pattern.compile("[a-zA-Z0-9_\\-]+=");
 
     /** Заглушка ожидаемого результата, если санитизация полностью вырезала текст. */
     private static final String NEUTRAL_EXPECTED_RESULT =
@@ -166,7 +171,8 @@ public class SyncGenerationService {
     /**
      * Разбирает ответ модели и применяет все проверки.
      * <p>
-     * Снимается обёртка {@code ```json ... ```}, если она есть, и текст парсится как JSON.
+     * Снимается обёртка {@code ```json ... ```} (или {@code ``` ... ```}, без учёта регистра {@code json}),
+     * если она есть, и текст парсится как JSON.
      * Обязательны ключи {@code testCases} и {@code clarifications}. Уточнения без типа получают
      * {@code MISSING_REQUIREMENT}. Затем выполняются {@link #validateAndRepairTestCases},
      * {@link #validateClarifications}, {@link #sanitizeAgainstDocument} и
@@ -181,8 +187,9 @@ public class SyncGenerationService {
      */
     private GenerationResult parseResponse(String json, String sourceMarkdown, String groundingAnswers) {
         try {
-            String cleaned = json.replaceAll("^```json\\s*", "")
-                    .replaceAll("```\\s*$", "")
+            String cleaned = json.trim()
+                    .replaceAll("(?i)^```(?:json)?\\s*", "")
+                    .replaceAll("\\s*```$", "")
                     .trim();
             Map<String, Object> map = mapper.readValue(cleaned, new TypeReference<>() {
             });
@@ -233,7 +240,7 @@ public class SyncGenerationService {
      * <ul>
      *   <li>{@code null}-элемент пропускается;</li>
      *   <li>id пустой или не соответствует {@link #ID_PATTERN} заменяется на {@code TC-<тип>-NNN};
-     *       повторный id тоже заменяется новым;</li>
+     *       повторный id тоже заменяется новым; новый номер не совпадает ни с одним id из ответа модели;</li>
      *   <li>type вне {@link #ALLOWED_TYPES} заменяется на {@code UI};</li>
      *   <li>пустой title — тест-кейс пропускается; title длиннее 200 символов обрезается;</li>
      *   <li>некорректный requirementRef заменяется на {@code N/A};</li>
@@ -248,6 +255,13 @@ public class SyncGenerationService {
      * @throws GenerationException если входной список не пуст, но ни один элемент не прошёл проверку
      */
     private List<TestCase> validateAndRepairTestCases(List<TestCase> cases) {
+        // Все id, которые модель вернула в этом ответе: автогенерация их не занимает
+        Set<String> reservedIds = new HashSet<>();
+        for (TestCase tc : cases) {
+            if (tc != null && tc.id() != null) {
+                reservedIds.add(tc.id());
+            }
+        }
         Set<String> seenIds = new HashSet<>();
         List<TestCase> repaired = new ArrayList<>(cases.size());
         int autoSeq = 1;
@@ -260,15 +274,20 @@ public class SyncGenerationService {
             String id = tc.id();
             if (isBlank(id) || !ID_PATTERN.matcher(id).matches()) {
                 String type = safeType(tc.type());
-                id = "TC-" + typeShort(type) + "-" + String.format("%03d", autoSeq++);
-                log.warn("Некорректный id '{}' заменён на '{}'", tc.id(), id);
+                String newId;
+                do {
+                    newId = "TC-" + typeShort(type) + "-" + String.format("%03d", autoSeq++);
+                } while (reservedIds.contains(newId) || seenIds.contains(newId));
+                log.warn("Некорректный id '{}' заменён на '{}'", tc.id(), newId);
+                id = newId;
             }
             if (!seenIds.add(id)) {
                 String type = safeType(tc.type());
                 String newId;
                 do {
                     newId = "TC-" + typeShort(type) + "-" + String.format("%03d", autoSeq++);
-                } while (!seenIds.add(newId));
+                } while (reservedIds.contains(newId) || seenIds.contains(newId));
+                seenIds.add(newId);
                 log.warn("Дубликат id '{}' заменён на '{}'", id, newId);
                 id = newId;
             }
@@ -363,8 +382,10 @@ public class SyncGenerationService {
      * Проверяет обоснованность тест-кейсов по документу и вырезает конкретику, которой в нём нет.
      * <p>
      * Для каждого тест-кейса выделяется блок требования из Markdown (см. {@link #extractRequirementBlock}).
-     * Токены ({@code URL}, HTTP-коды, snake_case-поля, числа от трёх цифр, query-параметры, цитаты UI)
-     * проверяются по документу, блоку требования и ответам пользователя. Неподтверждённые токены заменяются
+     * Токены (HTTP-коды, snake_case-поля, числа от трёх цифр и числа с пробелами, query-параметры вне
+     * абсолютных URL, цитаты UI) проверяются по документу, блоку требования и ответам пользователя.
+     * Сами абсолютные URL не проверяются и не вырезаются, но их query-параметры проверяются и вырезаются
+     * так же, как параметры вне URL. Неподтверждённые токены заменяются
      * нейтральными формулировками (см. {@link #sanitizeText}). В NEGATIVE-тест-кейсах шаги не санитизируются:
      * числа там являются тестовыми данными.
      * <p>
@@ -451,10 +472,11 @@ public class SyncGenerationService {
     /**
      * Санитизирует один текст (ожидаемый результат или шаг) по всем правилам обоснованности.
      * <p>
-     * Порядок: URL заменяются плейсхолдерами, чтобы их не затронули нормализация запятых и числа;
-     * вырезаются query-параметры с необоснованными значениями; проверяются HTTP-коды, snake_case-поля,
+     * Порядок: URL заменяются плейсхолдерами, чтобы их не затронули нормализация запятых и числа
+     * (перед этим из них вырезаются query-параметры с необоснованными значениями);
+     * вырезаются query-параметры с необоснованными значениями (вне URL); проверяются HTTP-коды, snake_case-поля,
      * числа от трёх цифр (с заменой на {@link #NEUTRAL_NUMBER}) и числа с пробелами; для типа UI проверяются
-     * цитаты в «…» и "…"; URL восстанавливаются; при любой вырезке нормализуются пробелы и пунктуация вне URL.
+     * цитаты в «…» и "…"; URL восстанавливаются; если накопитель ungrounded непуст, нормализуются пробелы и пунктуация вне URL.
      * Найденные необоснованные фрагменты добавляются в {@code ungrounded}.
      *
      * @param text        исходный текст
@@ -483,7 +505,8 @@ public class SyncGenerationService {
         while (urlM.find()) {
             withPlaceholders.append(out, last, urlM.start());
             withPlaceholders.append("__URL_").append(protectedUrls.size()).append("__");
-            protectedUrls.add(urlM.group());
+            protectedUrls.add(stripUngroundedQueryParams(urlM.group(), docLower, refLower,
+                    answersLower, ungrounded));
             last = urlM.end();
         }
         withPlaceholders.append(out.substring(last));
@@ -529,11 +552,12 @@ public class SyncGenerationService {
      * Вырезает целиком query-параметры {@code name=value}, значение которых не обосновано.
      * <p>
      * Обоснование: значение встречается как отдельное слово в документе, блоке требования или ответах.
-     * Пустые значения пропускаются. В {@code ungrounded} добавляется описание вида
+     * Пустые значения пропускаются. Метод применяется и к каждому абсолютному URL до замены его плейсхолдером
+     * (параметры проверяются так же, как вне URL). В {@code ungrounded} добавляется описание вида
      * {@code параметр name=value}. Так убирается запрос вида {@code ?models=unknown}, а не
-     * обрывок {@code ?models=}.
+     * обрывок {@code ?models=}; если удалён первый параметр, следующий получает {@code ?}, а не {@code &}.
      *
-     * @param text        текст с плейсхолдерами URL
+     * @param text        текст (фрагмент текста или абсолютный URL)
      * @param docLower    документ в нижнем регистре
      * @param refLower    блок требования в нижнем регистре или {@code null}
      * @param answersLower ответы в нижнем регистре или {@code null}
@@ -561,7 +585,15 @@ public class SyncGenerationService {
             }
             ungrounded.add("параметр " + name.substring(1) + "=" + value);
             sb.append(text, last, m.start());
-            last = m.end();
+            int next = m.end();
+            if (name.startsWith("?") && next < text.length() && text.charAt(next) == '&'
+                    && QUERY_PARAM_NEXT.matcher(text.substring(next + 1)).lookingAt()) {
+                // Первый параметр удалён, следующий становится первым: "?a=1&b=2" -> "?b=2"
+                sb.append(stripUngroundedQueryParams("?" + text.substring(next + 1),
+                        docLower, refLower, answersLower, ungrounded));
+                return sb.toString();
+            }
+            last = next;
             changed = true;
         }
         if (!changed) return text;
@@ -645,7 +677,8 @@ public class SyncGenerationService {
     }
 
     /**
-     * Проверяет, что HTTP-код в тексте стоит рядом со словом-контекстом: {@code http}, {@code статус},
+     * Проверяет, что в тексте есть этот HTTP-код рядом со словом-контекстом (проверяется любое вхождение
+     * кода в тексте, а не конкретное совпадение). Слова-контексты: {@code http}, {@code статус},
      * {@code status}, {@code ошибк}, {@code error}, {@code ответ}, {@code response}, {@code код}.
      * Контекст должен быть в пределах 40 символов от кода. Формы «HTTP 418» и «418 ... error» считаются обоснованными.
      *
@@ -654,10 +687,12 @@ public class SyncGenerationService {
      * @return {@code true}, если рядом есть слово-контекст
      */
     private boolean isGroundedHttpContext(String text, String code) {
+        // (?i) не распознаёт кириллицу без UNICODE_CASE, поэтому флаги передаются явно
         Pattern p = Pattern.compile(
-                "(?i)(?:HTTP\\s*|(?:http|статус|status|ошибк|error|ответ|response|код).{0,40}\\b)"
+                "(?:HTTP\\s*|(?:http|статус|status|ошибк|error|ответ|response|код).{0,40}\\b)"
                         + Pattern.quote(code) + "\\b|\\b" + Pattern.quote(code)
-                        + "\\b.{0,40}(?:http|статус|status|ошибк|error|ответ|response|код)");
+                        + "\\b.{0,40}(?:http|статус|status|ошибк|error|ответ|response|код)",
+                Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
         return p.matcher(text).find();
     }
 
@@ -794,7 +829,8 @@ public class SyncGenerationService {
 
     /**
      * Нормализует пробелы и пунктуацию вне URL: одна запятая с пробелом после, без пробела перед
-     * знаками {@code .,;:}, без повторных пробелов, без разделителей в начале и в конце текста.
+     * знаками {@code .,;:}, без повторных пробелов, без разделителей в начале и в конце каждого фрагмента вне URL.
+     * Пробел, отделяющий текст от соседнего URL, сохраняется (один пробел на границе).
      * Фрагменты URL остаются без изменений.
      *
      * @param text текст с восстановленными URL
@@ -805,30 +841,53 @@ public class SyncGenerationService {
         StringBuilder sb = new StringBuilder();
         int last = 0;
         while (m.find()) {
-            String plain = text.substring(last, m.start());
-            sb.append(plain.replaceAll("\\s*,\\s*", ", ")
-                    .replaceAll("\\s{2,}", " ")
-                    .replaceAll("\\s+([.,;:])", "$1")
-                    .replaceAll("^[\\s,;:]+", "")
-                    .replaceAll("[\\s,;:]+$", ""));
+            sb.append(normalizePlainFragment(text.substring(last, m.start()), last > 0, true));
             sb.append(m.group());
             last = m.end();
         }
-        String tail = text.substring(last)
-                .replaceAll("\\s*,\\s*", ", ")
+        sb.append(normalizePlainFragment(text.substring(last), last > 0, false));
+        return sb.toString().trim();
+    }
+
+    /**
+     * Нормализует один фрагмент вне URL (правила см. в {@link #normalizeSpacesOnlyOutsideUrls}).
+     * Если фрагмент примыкает к URL и у этой границы в исходном тексте был пробел или разделитель
+     * {@code ,;:}, на границе остаётся один пробел, чтобы текст не склеивался с URL.
+     *
+     * @param plain     фрагмент вне URL
+     * @param afterUrl  {@code true}, если перед фрагментом есть URL
+     * @param beforeUrl {@code true}, если после фрагмента есть URL
+     * @return нормализованный фрагмент
+     */
+    private String normalizePlainFragment(String plain, boolean afterUrl, boolean beforeUrl) {
+        String core = plain.replaceAll("\\s*,\\s*", ", ")
                 .replaceAll("\\s{2,}", " ")
                 .replaceAll("\\s+([.,;:])", "$1")
                 .replaceAll("^[\\s,;:]+", "")
                 .replaceAll("[\\s,;:]+$", "");
-        sb.append(tail);
-        return sb.toString().trim();
+        boolean spaceBefore = afterUrl && !plain.isEmpty() && isUrlSeparator(plain.charAt(0));
+        boolean spaceAfter = beforeUrl && !plain.isEmpty() && isUrlSeparator(plain.charAt(plain.length() - 1));
+        if (core.isEmpty()) {
+            return spaceBefore && spaceAfter ? " " : "";
+        }
+        return (spaceBefore ? " " : "") + core + (spaceAfter ? " " : "");
+    }
+
+    /**
+     * Проверяет, что символ отделяет текст от URL: пробел или один из знаков {@code ,;:}.
+     *
+     * @param c символ на границе фрагмента и URL
+     * @return {@code true}, если символ является пробелом или разделителем
+     */
+    private boolean isUrlSeparator(char c) {
+        return Character.isWhitespace(c) || Character.isSpaceChar(c) || ",;:".indexOf(c) >= 0;
     }
 
     /**
      * Извлекает раздел документа, соответствующий требованию.
      * Раздел начинается с первого заголовка Markdown, в тексте которого есть {@code ref}, и заканчивается
      * перед следующим заголовком того же или более высокого уровня (меньшее число решёток).
-     * Регистр не учитывается, {@code ref} экранируется.
+     * Регистр учитывается, {@code ref} экранируется.
      *
      * @param markdown исходный документ
      * @param ref      ссылка на требование
@@ -888,8 +947,9 @@ public class SyncGenerationService {
      * Объединяет уточнения по {@code requirementRef}: на одно требование остаётся один вопрос.
      * <p>
      * Основным считается первое уточнение типа {@code MISSING_REQUIREMENT}, а если его нет, то первое
-     * в группе. Если в группе несколько уточнений, их вопросы перечисляются в поле {@code reason}
-     * с префиксом «Дополнительные детали: ». Порядок групп сохраняется.
+     * в группе. Его {@code reason} сохраняется. Если в группе несколько уточнений, их вопросы добавляются
+     * в конец {@code reason} с префиксом «Дополнительные детали: ».
+     * Порядок групп сохраняется.
      *
      * @param src уточнения до дедупликации
      * @return уточнения по одному на каждый {@code requirementRef}
@@ -906,13 +966,17 @@ public class SyncGenerationService {
                     .filter(c -> c.type() == ClarificationType.MISSING_REQUIREMENT)
                     .findFirst()
                     .orElse(group.get(0));
-            String details = group.size() > 1
-                    ? "Дополнительные детали: " + group.stream()
-                    .filter(c -> c != primary)
-                    .map(Clarification::question)
-                    .reduce((a, b) -> a + "; " + b)
-                    .orElse("")
-                    : primary.reason();
+            String details = primary.reason();
+            if (group.size() > 1) {
+                String extra = group.stream()
+                        .filter(c -> c != primary)
+                        .map(Clarification::question)
+                        .reduce((a, b) -> a + "; " + b)
+                        .orElse("");
+                details = isBlank(details)
+                        ? "Дополнительные детали: " + extra
+                        : details + "; Дополнительные детали: " + extra;
+            }
             out.add(new Clarification(e.getKey(), primary.question(), details, primary.type()));
         }
         return out;

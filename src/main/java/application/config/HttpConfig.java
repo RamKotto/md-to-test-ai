@@ -5,6 +5,8 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.web.client.RestClient;
 
+import java.io.IOException;
+import java.net.HttpURLConnection;
 import java.time.Duration;
 
 /**
@@ -41,14 +43,22 @@ public class HttpConfig {
 
     /**
      * Создаёт клиент для pdf-to-md с таймаутами из {@code app.pdf-to-md}.
-     * Заголовков по умолчанию нет.
+     * Заголовков по умолчанию нет. Автоматическое следование редиректам отключено
+     * (см. {@link SimpleClientHttpRequestFactory#prepareConnection}): 3xx обрабатывает
+     * {@code PdfToMdClient}, который проверяет каждый Location по allowlist.
      *
      * @param appProps настройки приложения, включая {@code app.pdf-to-md}
      * @return настроенный {@link RestClient} с именем {@code pdfToMdRestClient}
      */
     @Bean
     public RestClient pdfToMdRestClient(AppProperties appProps) {
-        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory() {
+            @Override
+            protected void prepareConnection(HttpURLConnection connection, String httpMethod) throws IOException {
+                super.prepareConnection(connection, httpMethod);
+                connection.setInstanceFollowRedirects(false);
+            }
+        };
         factory.setConnectTimeout(Duration.ofSeconds(appProps.getPdfToMd().getConnectTimeoutSeconds()));
         factory.setReadTimeout(Duration.ofSeconds(appProps.getPdfToMd().getReadTimeoutSeconds()));
         return RestClient.builder()

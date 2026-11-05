@@ -57,6 +57,10 @@ public class OpenRouterClient {
      */
     @SuppressWarnings("unchecked")
     public String complete(String systemPrompt, String userText) {
+        // Map.of и List.of не принимают null и бросили бы NPE до входа в try: ответ был бы 500 вместо 502.
+        if (systemPrompt == null || userText == null) {
+            throw new GenerationException("Не заданы системный промпт или текст для запроса к OpenRouter");
+        }
         Map<String, Object> body = new HashMap<>();
         body.put("model", props.getModel());
         body.put("messages", List.of(

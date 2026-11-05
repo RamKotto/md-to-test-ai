@@ -31,6 +31,18 @@
       "type": "string"
     },
     {
+      "key": "firstArtifactId",
+      "value": "",
+      "type": "string",
+      "description": "UUID первого файла генерации (последний сегмент files[].downloadUrl), используется в GET /api/files/{id}."
+    },
+    {
+      "key": "journalEntryId",
+      "value": "22222222-2222-2222-2222-222222222222",
+      "type": "string",
+      "description": "UUID записи журнала для PUT и DELETE /api/journal/{id}."
+    },
+    {
       "key": "lastStatus",
       "value": "",
       "type": "string"
@@ -55,13 +67,16 @@
               "// Сохраняем состояние для следующих шагов",
               "pm.collectionVariables.set('taskId', json.taskId);",
               "pm.collectionVariables.set('lastStatus', json.status);",
-              "const mdFile = (json.files || []).find(f => f.filename !== '_index.md' && f.filename !== '_clarifications.md');",
-              "if (mdFile) { pm.collectionVariables.set('firstFilename', mdFile.filename); }",
+              "const mdFile = (json.files || []).find(f => f.id !== '_index' && f.id !== '_clarifications');",
+              "if (mdFile) {",
+              "  pm.collectionVariables.set('firstFilename', mdFile.filename);",
+              "  pm.collectionVariables.set('firstArtifactId', mdFile.downloadUrl.split('/').pop());",
+              "}",
               "",
               "// Строгий формат TestCase",
               "if (Array.isArray(json.testCases) && json.testCases.length > 0) {",
               "  const tc = json.testCases[0];",
-              "  pm.test('id format', () => pm.expect(tc.id).to.match(/^TC-(UI|API|E2E|NEG|SEC|PERF)-\\d{3,}$/));",
+              "  pm.test('id format', () => pm.expect(tc.id).to.match(/^TC-(UI|API|E2E|NEG|NEGATIVE|SEC|SECURITY|PERF|PERFORMANCE)-\\d{3,}$/));",
               "  pm.test('type valid', () => pm.expect(tc.type).to.be.oneOf(['UI','API','E2E','NEGATIVE','SECURITY','PERFORMANCE']));",
               "  pm.test('priority valid', () => pm.expect(tc.priority).to.be.oneOf(['P0','P1','P2','P3']));",
               "  pm.test('preconditions array', () => pm.expect(tc.preconditions).to.be.an('array'));",
@@ -136,8 +151,11 @@
               "",
               "pm.collectionVariables.set('taskId', json.taskId);",
               "pm.collectionVariables.set('lastStatus', json.status);",
-              "const mdFile = (json.files || []).find(f => f.filename !== '_index.md' && f.filename !== '_clarifications.md');",
-              "if (mdFile) { pm.collectionVariables.set('firstFilename', mdFile.filename); }"
+              "const mdFile = (json.files || []).find(f => f.id !== '_index' && f.id !== '_clarifications');",
+              "if (mdFile) {",
+              "  pm.collectionVariables.set('firstFilename', mdFile.filename);",
+              "  pm.collectionVariables.set('firstArtifactId', mdFile.downloadUrl.split('/').pop());",
+              "}"
             ]
           }
         }
@@ -345,7 +363,7 @@
               "",
               "if (Array.isArray(json.testCases) && json.testCases.length > 0) {",
               "  json.testCases.forEach(tc => {",
-              "    pm.expect(tc.id).to.match(/^TC-(UI|API|E2E|NEG|SEC|PERF)-\\d{3,}$/);",
+              "    pm.expect(tc.id).to.match(/^TC-(UI|API|E2E|NEG|NEGATIVE|SEC|SECURITY|PERF|PERFORMANCE)-\\d{3,}$/);",
               "    pm.expect(tc.priority).to.be.oneOf(['P0','P1','P2','P3']);",
               "    pm.expect(tc.preconditions).to.be.an('array');",
               "  });",
@@ -436,6 +454,114 @@
       "response": []
     },
     {
+      "name": "4b. Состояние сессии уточнений",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status 200', () => pm.response.to.have.status(200));",
+              "const json = pm.response.json();",
+              "pm.test('has version', () => pm.expect(json.version).to.be.a('number'));",
+              "pm.test('has answers array', () => pm.expect(json.answers).to.be.an('array'));",
+              "pm.test('has draft object', () => pm.expect(json.draft).to.be.an('object'));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/generate/{{taskId}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "generate", "{{taskId}}"]
+        },
+        "description": "Состояние сессии уточнений генерации из БД: status, version, round, clarifications, answers, draft. Срок хранения 30 дней; для истёкшей сессии → 400 «Сессия не найдена или истекла»."
+      },
+      "response": []
+    },
+    {
+      "name": "4c. Черновик ответов",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status 204', () => pm.response.to.have.status(204));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "PUT",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"draft\":{\"0\":\"черновик ответа\"}}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/generate/{{taskId}}/draft",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "generate", "{{taskId}}", "draft"]
+        },
+        "description": "Сохраняет черновик ответов на уточнения: draft перезаписывается целиком, version не меняется. Ответ 204."
+      },
+      "response": []
+    },
+    {
+      "name": "4d. Ответ с устаревшей версией → 409",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status 409', () => pm.response.to.have.status(409));",
+              "pm.test('mentions version conflict', () => pm.expect(pm.response.json().message).to.include('Сессия уже изменена'));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"answers\":[{\"question\":\"x\",\"answer\":\"y\",\"topicKey\":\"z\"}],\"expectedVersion\":0}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/generate/{{taskId}}/answers",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "generate", "{{taskId}}", "answers"]
+        },
+        "description": "Передаёт expectedVersion=0, который не совпадает с текущей version сессии → 409 «Сессия уже изменена в другом окне. Обновите страницу.». Тест рассчитан на сессию с version больше 0."
+      },
+      "response": []
+    },
+    {
       "name": "5. Скачать MD-тест-кейс",
       "event": [
         {
@@ -443,8 +569,8 @@
           "script": {
             "type": "text/javascript",
             "exec": [
-              "if (!pm.collectionVariables.get('firstFilename')) {",
-              "  console.log('Skipping download: no filename');",
+              "if (!pm.collectionVariables.get('firstArtifactId')) {",
+              "  console.log('Skipping download: no artifactId');",
               "  pm.execution.skipRequest();",
               "}"
             ]
@@ -456,6 +582,7 @@
             "type": "text/javascript",
             "exec": [
               "pm.test('status 200', () => pm.response.to.have.status(200));",
+              "pm.test('artifactId is UUID', () => pm.expect(pm.collectionVariables.get('firstArtifactId')).to.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i));",
               "pm.test('content-type markdown', () => pm.expect(pm.response.headers.get('Content-Type')).to.include('text/markdown'));",
               "pm.test('content-disposition attachment', () => pm.expect(pm.response.headers.get('Content-Disposition')).to.include('attachment'));",
               "pm.test('content-length present', () => pm.expect(pm.response.headers.get('Content-Length')).to.be.a('string'));",
@@ -472,17 +599,17 @@
         "method": "GET",
         "header": [],
         "url": {
-          "raw": "{{baseUrl}}/api/files/{{firstFilename}}",
+          "raw": "{{baseUrl}}/api/files/{{firstArtifactId}}",
           "host": [
             "{{baseUrl}}"
           ],
           "path": [
             "api",
             "files",
-            "{{firstFilename}}"
+            "{{firstArtifactId}}"
           ]
         },
-        "description": "Скачивает MD-файл тест-кейса, имя берётся из первого files[].filename предыдущего generate."
+        "description": "Скачивает MD-файл тест-кейса из БД (qa.artifacts) по UUID артефакта: firstArtifactId — последний сегмент files[].downloadUrl предыдущего generate."
       },
       "response": []
     },
@@ -513,7 +640,7 @@
             "..%2F..%2Fetc%2Fpasswd"
           ]
         },
-        "description": "SAFE_NAME regex: имя с '..' или '/' → 400."
+        "description": "Path traversal вместо UUID (..%2F..%2Fetc%2Fpasswd): некорректный UUID → 400 «Файл не найден»."
       },
       "response": []
     },
@@ -545,6 +672,122 @@
           ]
         },
         "description": "Проверка состояния приложения."
+      },
+      "response": []
+    },
+    {
+      "name": "7. Журнал: список",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status 200', () => pm.response.to.have.status(200));",
+              "pm.test('array of entries', () => pm.expect(pm.response.json()).to.be.an('array'));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/journal",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "journal"]
+        },
+        "description": "Список записей журнала: новые первыми, не более 500, без записей с истёкшим сроком. Журнал хранится в БД (qa.journal_entries)."
+      },
+      "response": []
+    },
+    {
+      "name": "7a. Журнал: сохранить запись",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status 200', () => pm.response.to.have.status(200));",
+              "pm.test('id saved', () => pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get('journalEntryId')));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "PUT",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"type\":\"generate\",\"title\":\"Тест\",\"status\":\"DONE\",\"taskId\":\"{{taskId}}\",\"sourceName\":\"spec.pdf\",\"createdAt\":\"2026-11-05T10:00:00Z\",\"payload\":{\"stats\":{\"cases\":1},\"files\":[]}}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/journal/{{journalEntryId}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "journal", "{{journalEntryId}}"]
+        },
+        "description": "Upsert записи журнала по journalEntryId. Ответ 200 с записью; payload сервер не разбирает."
+      },
+      "response": []
+    },
+    {
+      "name": "7b. Журнал: удалить запись",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status 204', () => pm.response.to.have.status(204));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "DELETE",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/journal/{{journalEntryId}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "journal", "{{journalEntryId}}"]
+        },
+        "description": "Удаляет запись журнала по journalEntryId. Ответ 204."
+      },
+      "response": []
+    },
+    {
+      "name": "7c. Журнал: очистить",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('status 204', () => pm.response.to.have.status(204));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "DELETE",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/journal",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "journal"]
+        },
+        "description": "Очистка всего журнала. Ответ 204."
       },
       "response": []
     },
@@ -611,8 +854,11 @@
                   "",
                   "pm.collectionVariables.set('taskId', json.taskId);",
                   "pm.collectionVariables.set('lastStatus', json.status);",
-                  "const mdFile = (json.files || []).find(f => f.filename !== '_index.md' && f.filename !== '_clarifications.md');",
-                  "if (mdFile) { pm.collectionVariables.set('firstFilename', mdFile.filename); }"
+                  "const mdFile = (json.files || []).find(f => f.id !== '_index' && f.id !== '_clarifications');",
+                  "if (mdFile) {",
+              "  pm.collectionVariables.set('firstFilename', mdFile.filename);",
+              "  pm.collectionVariables.set('firstArtifactId', mdFile.downloadUrl.split('/').pop());",
+              "}"
                 ]
               }
             }

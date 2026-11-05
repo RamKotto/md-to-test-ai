@@ -119,7 +119,7 @@ public class TestCaseMarkdownRenderer {
      *
      * @param testCases      тест-кейсы в порядке вывода; может быть {@code null}
      * @param clarifications уточнения прогона; может быть {@code null}
-     * @param filenameById   id тест-кейса → реальное имя файла на диске
+     * @param filenameById   id тест-кейса → реальное имя файла прогона; не должен быть {@code null}
      * @param clarFilename   реальное имя {@code _clarifications.md} или {@code null}, если файла нет
      * @return текст Markdown
      */
@@ -170,13 +170,13 @@ public class TestCaseMarkdownRenderer {
 
     /**
      * Старая версия {@link #renderIndexFromSaved}, которая строит имена файлов из тест-кейсов.
-     * Не учитывает уникализацию имён на диске и поэтому может давать ссылки на несуществующие файлы.
+     * Не учитывает уникализацию имён внутри прогона и поэтому может давать ссылки на файлы, которых нет в наборе.
      * Внутри модуля не вызывается.
      *
      * @param testCases      тест-кейсы
      * @param clarifications уточнения прогона
      * @return текст Markdown
-     * @deprecated используйте {@link #renderIndexFromSaved} — старый метод даёт рассинхрон с диском.
+     * @deprecated используйте {@link #renderIndexFromSaved} — старый метод даёт рассинхрон с сохранёнными файлами.
      */
     @Deprecated
     public String renderIndex(List<TestCase> testCases, List<Clarification> clarifications) {
@@ -212,8 +212,8 @@ public class TestCaseMarkdownRenderer {
      * Строит имя файла тест-кейса в виде {@code <id>_<slug>.md}.
      * <p>
      * Id: символы вне {@code [a-zA-Z0-9_-]} заменяются на {@code _}; пустой id даёт {@code TC}.
-     * Slug: заголовок в нижнем регистре, всё, кроме латинских букв и цифр, заменяется на {@code _};
-     * лишние подчёркивания по краям убираются; ограничение 60 символов. Кириллица в slug не попадает,
+     * Slug: заголовок в нижнем регистре; каждая последовательность символов, кроме латинских букв и цифр,
+     * заменяется одним {@code _}; подчёркивания по краям убираются; ограничение 60 символов. Кириллица в slug не попадает,
      * поэтому тест-кейс с заголовком только на русском получает slug {@code test_case}.
      *
      * @param tc тест-кейс

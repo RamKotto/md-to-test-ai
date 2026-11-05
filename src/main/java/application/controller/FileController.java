@@ -1,8 +1,8 @@
 package application.controller;
 
-import application.service.TestStorageService;
+import application.repository.ArtifactRepository;
 import lombok.RequiredArgsConstructor;
-import org.springframework.core.io.Resource;
+import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -11,48 +11,55 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-import java.io.IOException;
+import java.util.UUID;
 
 /**
- * REST-контроллер скачивания сгенерированных Markdown-файлов по адресу {@code /api/files/{filename}}.
+ * REST-контроллер скачивания артефактов по UUID: {@code GET /api/files/{id}}.
  * <p>
- * Файлы читаются через {@link TestStorageService#load(String)}, который проверяет имя файла
- * и защищает от path traversal.
+ * Тело — содержимое из {@code qa.artifacts}, {@code Content-Type} — из {@code content_type},
+ * {@code Content-Disposition: attachment; filename="..."}. Некорректный или неизвестный UUID → 400.
  */
 @RestController
 @RequestMapping("/api/files")
 @RequiredArgsConstructor
 public class FileController {
 
-    private final TestStorageService storage;
+    /** Текст ошибки для неизвестного или некорректного id. */
+    static final String NOT_FOUND = "Файл не найден";
+
+    private final ArtifactRepository artifacts;
 
     /**
-     * Отдаёт файл как вложение с {@code Content-Type: text/markdown; charset=UTF-8}.
-     * Заголовок {@code Content-Disposition: attachment} задаёт имя файла, {@code Content-Length}
-     * выставляется, если размер удалось определить.
+     * Отдаёт артефакт как вложение.
      *
-     * @param filename имя файла вида {@code [a-zA-Z0-9_-]+.md}
+     * @param id UUID артефакта
      * @return {@code 200 OK} с телом файла
-     * @throws IllegalArgumentException если имя некорректно, выходит за пределы каталога
-     *                                  или файл не найден (ответ {@code 400}, см.
-     *                                  {@link application.exception.GlobalExceptionHandler})
+     * @throws IllegalArgumentException если id не UUID, файл не найден или срок хранения истёк
+     *                                  (ответ {@code 400}, см. {@link application.exception.GlobalExceptionHandler})
      */
-    @GetMapping("/{filename}")
-    public ResponseEntity<Resource> download(@PathVariable String filename) {
-        Resource resource = storage.load(filename);
-        long length;
-        try {
-            length = resource.contentLength();
-        } catch (IOException e) {
-            length = -1;
-        }
-        var builder = ResponseEntity.ok()
-                .contentType(MediaType.parseMediaType("text/markdown; charset=UTF-8"))
+    @GetMapping("/{id}")
+    public ResponseEntity<byte[]> download(@PathVariable String id) {
+        UUID uuid = parseId(id);
+        var file = artifacts.findById(uuid).orElseThrow(() -> new IllegalArgumentException(NOT_FOUND));
+        return ResponseEntity.ok()
+                .contentType(MediaType.parseMediaType(file.contentType()))
                 .header(HttpHeaders.CONTENT_DISPOSITION,
-                        "attachment; filename=\"" + resource.getFilename() + "\"");
-        if (length >= 0) {
-            builder.contentLength(length);
+                        ContentDisposition.attachment().filename(file.filename()).build().toString())
+                .body(file.content());
+    }
+
+    /**
+     * Разбирает UUID из пути; при ошибке возвращает ту же ошибку, что и для отсутствующего файла.
+     *
+     * @param id строка из пути
+     * @return UUID
+     * @throws IllegalArgumentException если строка не UUID
+     */
+    private static UUID parseId(String id) {
+        try {
+            return UUID.fromString(id);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException(NOT_FOUND);
         }
-        return builder.body(resource);
     }
 }

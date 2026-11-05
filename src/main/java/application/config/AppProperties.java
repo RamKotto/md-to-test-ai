@@ -8,7 +8,6 @@ import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
 
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -16,6 +15,7 @@ import java.util.List;
  * Настройки прикладной логики, привязанные к префиксу {@code app} из {@code application.yml}.
  * <p>
  * Валидируется при старте: при нарушении ограничений контекст не поднимается.
+ * Файлы и сессии хранятся в БД (см. {@code docs/storage-contract.md}), поэтому каталога на диске нет.
  * Вложенные группы: {@code app.storage}, {@code app.pdf-to-md}, {@code app.sessions},
  * {@code app.prompts}.
  */
@@ -24,7 +24,7 @@ import java.util.List;
 @ConfigurationProperties(prefix = "app")
 public class AppProperties {
 
-    /** Настройки каталога с итоговыми Markdown-файлами и базового URL для скачивания. */
+    /** Настройки базового URL для ссылок на скачивание артефактов. */
     @Valid
     private Storage storage = new Storage();
 
@@ -32,7 +32,7 @@ public class AppProperties {
     @Valid
     private PdfToMd pdfToMd = new PdfToMd();
 
-    /** Настройки in-memory сессий уточнений. */
+    /** Настройки ограничений сессий уточнений. */
     @Valid
     private Sessions sessions = new Sessions();
 
@@ -41,20 +41,13 @@ public class AppProperties {
     private Prompts prompts = new Prompts();
 
     /**
-     * Параметры хранилища файлов.
+     * Параметры хранилища файлов (артефакты лежат в {@code qa.artifacts}).
      */
     @Data
     public static class Storage {
 
         /**
-         * Каталог, куда записываются файлы тест-кейсов. Создаётся при старте приложения.
-         * Значение по умолчанию класса относительно рабочей директории; в {@code application.yml}
-         * переопределяется на {@code ${user.dir}/data/tests}.
-         */
-        private Path directory = Path.of("./data/tests");
-
-        /**
-         * Базовый URL, от которого строится {@code downloadUrl} в ответе: {@code {baseUrl}/api/files/{имя}}.
+         * Базовый URL, от которого строится {@code downloadUrl} в ответе: {@code {baseUrl}/api/files/{uuid}}.
          * Должен быть http(s)-URL.
          */
         @NotBlank
@@ -93,25 +86,14 @@ public class AppProperties {
     }
 
     /**
-     * Параметры in-memory сессий уточнений.
+     * Ограничения сессий уточнений.
      */
     @Data
     public static class Sessions {
 
-        /** Время жизни сессии от момента сохранения, в минутах (минимум 1). */
-        @Min(1)
-        private int ttlMinutes = 120;
-
-        /**
-         * Максимальное число одновременно хранимых сессий (минимум 1).
-         * При переполнении вытесняется самая старая по времени создания сессия.
-         */
-        @Min(1)
-        private int maxCount = 1000;
-
         /**
          * Максимальная длина Markdown-документа в символах, который можно сохранить в сессии (минимум 1).
-         * Проверяется до записи файлов, чтобы клиент не получил ошибку при уже записанных файлах.
+         * Проверяется до записи, чтобы клиент не получил ошибку уже после записи артефактов.
          */
         @Min(1)
         private int maxMarkdownChars = 1_000_000;

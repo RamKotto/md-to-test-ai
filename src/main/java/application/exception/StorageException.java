@@ -1,8 +1,8 @@
 package application.exception;
 
 /**
- * Ошибка файлового хранилища: не удалось создать каталог, записать или откатить файлы.
- * Отображается в HTTP 500 через {@link GlobalExceptionHandler}.
+ * Ошибка файлового хранилища. Файлы теперь хранятся в БД ({@code qa.artifacts}), поэтому в текущей
+ * реализации исключение не выбрасывается. Отображается в HTTP 500 через {@link GlobalExceptionHandler}.
  */
 public class StorageException extends RuntimeException {
 

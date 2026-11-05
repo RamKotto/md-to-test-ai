@@ -12,7 +12,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends curl \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd -r app && useradd -r -g app -d /app app \
- && mkdir -p /app/data && chown -R app:app /app
+ && chown -R app:app /app
 WORKDIR /app
 COPY --from=build /src/target/*.jar /app/app.jar
 USER app
