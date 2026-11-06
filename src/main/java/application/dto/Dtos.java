@@ -86,7 +86,8 @@ public class Dtos {
     /**
      * Уточнение к требованию.
      *
-     * @param requirementRef ссылка на требование ({@code REQ-…} или {@code N/A})
+     * @param requirementRef ссылка на требование: идентификатор из заголовка документа как есть
+     *                       (например, {@code FR-UI-01} или {@code REQ-1}), либо {@code N/A}
      * @param question       вопрос к пользователю
      * @param reason         причина вопроса
      * @param type           тип уточнения, см. {@link ClarificationType}

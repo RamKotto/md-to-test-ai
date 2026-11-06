@@ -48,14 +48,12 @@ public class SyncGenerationService {
     private static final Pattern HTTP_METHOD =
             Pattern.compile("\\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\\b");
 
-    /** Трёхзначные HTTP-коды 1xx–5xx как отдельные слова. Проверяются на обоснованность. */
+    /**
+     * Трёхзначные HTTP-коды 1xx–5xx как отдельные слова. Код обоснован только если он есть в документе,
+     * блоке требования или ответах пользователя; белого списка распространённых кодов нет.
+     */
     private static final Pattern CONCRETE_HTTP_CODE =
             Pattern.compile("\\b([1-5]\\d{2})\\b");
-
-    /** Распространённые HTTP-коды, которые считаются обоснованными без проверки по документу. */
-    private static final Set<String> HTTP_CODE_WHITELIST =
-            Set.of("200", "201", "204", "400", "401", "403", "404", "409", "422",
-                    "429", "500", "502", "503");
 
     /** snake_case идентификаторы (например, {@code error_code}). Проверяются на обоснованность. */
     private static final Pattern CONCRETE_FIELD_NAME =
@@ -110,6 +108,10 @@ public class SyncGenerationService {
     /** Замена для вырезанного числа в тексте. */
     private static final String NEUTRAL_NUMBER =
             "[значение из ответа на уточнение]";
+
+    /** Замена для HTTP-кода, которого нет в документе: код описывается словами, а не указывается. */
+    private static final String NEUTRAL_HTTP_CODE =
+            "[код ответа уточняется]";
 
     private final OpenRouterClient openRouter;
     private final ObjectMapper mapper;
@@ -173,10 +175,11 @@ public class SyncGenerationService {
      * <p>
      * Снимается обёртка {@code ```json ... ```} (или {@code ``` ... ```}, без учёта регистра {@code json}),
      * если она есть, и текст парсится как JSON.
-     * Обязательны ключи {@code testCases} и {@code clarifications}. Уточнения без типа получают
-     * {@code MISSING_REQUIREMENT}. Затем выполняются {@link #validateAndRepairTestCases},
-     * {@link #validateClarifications}, {@link #sanitizeAgainstDocument} и
-     * {@link #dedupeClarifications}. Любая ошибка разбора, кроме {@link GenerationException},
+     * Обязательны ключи {@code testCases} и {@code clarifications}. Уточнения разбираются через
+     * {@link #parseClarifications}: неизвестный тип становится {@code MISSING_REQUIREMENT}. Затем выполняются
+     * {@link #validateAndRepairTestCases}, {@link #validateClarifications}, {@link #sanitizeAgainstDocument}
+     * и {@link #dedupeClarifications} (только для вопросов; {@code UNGROUNDED_ASSUMPTION} добавляются
+     * в результат без слияния). Любая ошибка разбора, кроме {@link GenerationException},
      * оборачивается в {@link GenerationException}.
      *
      * @param json             сырой текст ответа модели
@@ -203,17 +206,8 @@ public class SyncGenerationService {
                     map.getOrDefault("testCases", List.of()),
                     new TypeReference<List<TestCase>>() {
                     });
-            List<Clarification> rawClarifications = mapper.convertValue(
-                    map.getOrDefault("clarifications", List.of()),
-                    new TypeReference<List<Clarification>>() {
-                    });
-
-            List<Clarification> modelClarifications = rawClarifications.stream()
-                    .filter(Objects::nonNull)
-                    .map(c -> c.type() == null
-                            ? Clarification.missing(c.requirementRef(), c.question(), c.reason())
-                            : c)
-                    .toList();
+            List<Clarification> modelClarifications = parseClarifications(
+                    map.getOrDefault("clarifications", List.of()));
 
             List<TestCase> validated = validateAndRepairTestCases(rawCases);
             List<Clarification> validClarifications = validateClarifications(modelClarifications);
@@ -222,17 +216,79 @@ public class SyncGenerationService {
             List<TestCase> sanitized = sanitizeAgainstDocument(
                     validated, sourceMarkdown, groundingAnswers, groundingClarifications);
 
-            List<Clarification> merged = new ArrayList<>(validClarifications);
-            merged.addAll(groundingClarifications);
-            List<Clarification> deduped = dedupeClarifications(merged);
+            List<Clarification> all = new ArrayList<>(validClarifications);
+            all.addAll(groundingClarifications);
+            // UNGROUNDED_ASSUMPTION не сливаются с вопросами к пользователю: тип и записи сохраняются
+            List<Clarification> questions = all.stream()
+                    .filter(c -> c.type() != ClarificationType.UNGROUNDED_ASSUMPTION)
+                    .toList();
+            List<Clarification> ungrounded = all.stream()
+                    .filter(c -> c.type() == ClarificationType.UNGROUNDED_ASSUMPTION)
+                    .toList();
+            List<Clarification> result = new ArrayList<>(dedupeClarifications(questions));
+            result.addAll(ungrounded);
 
-            return new GenerationResult(sanitized, deduped);
+            return new GenerationResult(sanitized, result);
         } catch (GenerationException e) {
             throw e;
         } catch (Exception e) {
             log.error("Ошибка парсинга JSON: {}", json, e);
             throw new GenerationException("Модель вернула невалидный JSON: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * Разбирает уточнения ответа модели. Элементы {@code null} пропускаются. Отсутствующий тип даёт
+     * {@code MISSING_REQUIREMENT}; неизвестный тип тоже заменяется на {@code MISSING_REQUIREMENT}
+     * с записью в лог, а не роняет весь ответ.
+     *
+     * @param raw значение ключа {@code clarifications} из ответа модели
+     * @return уточнения с нормализованным типом
+     */
+    private List<Clarification> parseClarifications(Object raw) {
+        List<Map<String, Object>> items = mapper.convertValue(raw,
+                new TypeReference<List<Map<String, Object>>>() {
+                });
+        List<Clarification> out = new ArrayList<>(items.size());
+        for (Map<String, Object> item : items) {
+            if (item == null) {
+                continue;
+            }
+            out.add(new Clarification(
+                    asText(item.get("requirementRef")),
+                    asText(item.get("question")),
+                    asText(item.get("reason")),
+                    parseClarificationType(item.get("type"))));
+        }
+        return out;
+    }
+
+    /**
+     * Приводит тип уточнения из ответа модели к {@link ClarificationType}.
+     *
+     * @param value значение поля {@code type}; может быть {@code null}
+     * @return распознанный тип либо {@code MISSING_REQUIREMENT}
+     */
+    private ClarificationType parseClarificationType(Object value) {
+        if (value == null) {
+            return ClarificationType.MISSING_REQUIREMENT;
+        }
+        try {
+            return ClarificationType.valueOf(value.toString().strip().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException e) {
+            log.warn("Неизвестный type уточнения '{}' — заменён на MISSING_REQUIREMENT", value);
+            return ClarificationType.MISSING_REQUIREMENT;
+        }
+    }
+
+    /**
+     * Преобразует значение JSON в строку.
+     *
+     * @param value значение поля, может быть {@code null}
+     * @return строковое представление или {@code null}
+     */
+    private String asText(Object value) {
+        return value == null ? null : value.toString();
     }
 
     /**
@@ -386,8 +442,9 @@ public class SyncGenerationService {
      * абсолютных URL, цитаты UI) проверяются по документу, блоку требования и ответам пользователя.
      * Сами абсолютные URL не проверяются и не вырезаются, но их query-параметры проверяются и вырезаются
      * так же, как параметры вне URL. Неподтверждённые токены заменяются
-     * нейтральными формулировками (см. {@link #sanitizeText}). В NEGATIVE-тест-кейсах шаги не санитизируются:
-     * числа там являются тестовыми данными.
+     * нейтральными формулировками (см. {@link #sanitizeText}). В шагах NEGATIVE-тест-кейсов входные значения
+     * (числа, значения query-параметров) не вырезаются: это тестовые данные. URL-параметры, имена полей и HTTP-коды
+     * в них проверяются так же, как везде.
      * <p>
      * Если что-то вырезано и ответов пользователя нет, по каждому {@code requirementRef} добавляется одно
      * уточнение типа {@code UNGROUNDED_ASSUMPTION}. Если документа нет, тест-кейсы возвращаются без изменений.
@@ -436,10 +493,8 @@ public class SyncGenerationService {
             List<String> sanitizedSteps = new ArrayList<>();
             if (tc.steps() != null) {
                 for (String step : tc.steps()) {
-                    String sanitized = isNegative
-                            ? nullSafe(step)
-                            : sanitizeText(nullSafe(step), docLower, refLower, answersLower,
-                            ungrounded, true, false, tc.type());
+                    String sanitized = sanitizeText(nullSafe(step), docLower, refLower, answersLower,
+                            ungrounded, true, isNegative, tc.type());
                     if (sanitized.isBlank()) {
                         sanitized = NEUTRAL_STEP_SUFFIX.trim();
                     }
@@ -474,19 +529,22 @@ public class SyncGenerationService {
      * <p>
      * Порядок: URL заменяются плейсхолдерами, чтобы их не затронули нормализация запятых и числа
      * (перед этим из них вырезаются query-параметры с необоснованными значениями);
-     * вырезаются query-параметры с необоснованными значениями (вне URL); проверяются HTTP-коды, snake_case-поля,
-     * числа от трёх цифр (с заменой на {@link #NEUTRAL_NUMBER}) и числа с пробелами; для типа UI проверяются
+     * вырезаются query-параметры с необоснованными значениями (вне URL); проверяются HTTP-коды (необоснованный код
+     * заменяется на {@link #NEUTRAL_HTTP_CODE}), snake_case-поля, числа от трёх цифр (с заменой на
+     * {@link #NEUTRAL_NUMBER}) и числа с пробелами; для типа UI проверяются
      * цитаты в «…» и "…"; URL восстанавливаются; если накопитель ungrounded непуст, нормализуются пробелы и пунктуация вне URL.
      * Найденные необоснованные фрагменты добавляются в {@code ungrounded}.
+     * <p>
+     * Входные значения шага NEGATIVE-кейса ({@code isStep && isNegative}) не проверяются: числа и значения
+     * query-параметров считаются тестовыми данными. Имена query-параметров, поля, HTTP-коды и цитаты проверяются.
      *
      * @param text        исходный текст
      * @param docLower    документ в нижнем регистре
      * @param refLower    блок требования в нижнем регистре или {@code null}
      * @param answersLower ответы пользователя в нижнем регистре или {@code null}
      * @param ungrounded  накопитель описаний вырезанного; изменяется
-     * @param isStep      {@code true} для шага, {@code false} для ожидаемого результата; в текущей реализации не влияет
-     *                    на результат
-     * @param isNegative  {@code true} для NEGATIVE-кейса; в текущей реализации не влияет на результат
+     * @param isStep      {@code true} для шага, {@code false} для ожидаемого результата
+     * @param isNegative  {@code true} для NEGATIVE-кейса
      * @param type        тип тест-кейса; при {@code UI} включается проверка цитат
      * @return санитизированный текст; может быть пустым, если всё вырезано
      */
@@ -497,6 +555,7 @@ public class SyncGenerationService {
             return text;
         }
         String out = text;
+        boolean inputValues = isStep && isNegative;
 
         List<String> protectedUrls = new ArrayList<>();
         Matcher urlM = URL_IN_TEXT.matcher(out);
@@ -506,33 +565,36 @@ public class SyncGenerationService {
             withPlaceholders.append(out, last, urlM.start());
             withPlaceholders.append("__URL_").append(protectedUrls.size()).append("__");
             protectedUrls.add(stripUngroundedQueryParams(urlM.group(), docLower, refLower,
-                    answersLower, ungrounded));
+                    answersLower, ungrounded, inputValues));
             last = urlM.end();
         }
         withPlaceholders.append(out.substring(last));
         String working = withPlaceholders.toString();
 
-        working = stripUngroundedQueryParams(working, docLower, refLower, answersLower, ungrounded);
+        working = stripUngroundedQueryParams(working, docLower, refLower, answersLower, ungrounded, inputValues);
 
-        final String currentOut1 = working;
+        // Белого списка кодов нет: HTTP-код обоснован только документом, блоком требования или ответами
         working = replaceUngrounded(working, CONCRETE_HTTP_CODE, 1, docLower, refLower, answersLower,
                 ungrounded,
                 token -> "HTTP " + token,
-                token -> HTTP_CODE_WHITELIST.contains(token) || isGroundedHttpContext(currentOut1, token));
+                token -> false,
+                NEUTRAL_HTTP_CODE);
 
         working = replaceUngrounded(working, CONCRETE_FIELD_NAME, 1, docLower, refLower, answersLower,
                 ungrounded,
                 token -> "поле '" + token + "'",
                 FIELD_NAME_WHITELIST::contains);
 
-        working = replaceUngrounded(working, CONCRETE_NUMBER_LIMIT, 1, docLower, refLower, answersLower,
-                ungrounded,
-                token -> "число " + token,
-                token -> isArithmeticDerivative(token, docLower, refLower, answersLower),
-                NEUTRAL_NUMBER);
+        if (!inputValues) {
+            working = replaceUngrounded(working, CONCRETE_NUMBER_LIMIT, 1, docLower, refLower, answersLower,
+                    ungrounded,
+                    token -> "число " + token,
+                    token -> isArithmeticDerivative(token, docLower, refLower, answersLower),
+                    NEUTRAL_NUMBER);
 
-        working = replaceUngroundedNormalized(working, SPACED_NUMBER, docLower, refLower, answersLower,
-                ungrounded, token -> "число " + token, NEUTRAL_NUMBER);
+            working = replaceUngroundedNormalized(working, SPACED_NUMBER, docLower, refLower, answersLower,
+                    ungrounded, token -> "число " + token, NEUTRAL_NUMBER);
+        }
 
         if ("UI".equalsIgnoreCase(nullSafe(type))) {
             working = sanitizeUiQuotes(working, docLower, refLower, answersLower, ungrounded);
@@ -556,16 +618,21 @@ public class SyncGenerationService {
      * (параметры проверяются так же, как вне URL). В {@code ungrounded} добавляется описание вида
      * {@code параметр name=value}. Так убирается запрос вида {@code ?models=unknown}, а не
      * обрывок {@code ?models=}; если удалён первый параметр, следующий получает {@code ?}, а не {@code &}.
+     * <p>
+     * При {@code valuesAreInput = true} (входные значения шага NEGATIVE-кейса) проверяется только имя параметра:
+     * значение считается тестовыми данными и не вырезается.
      *
-     * @param text        текст (фрагмент текста или абсолютный URL)
-     * @param docLower    документ в нижнем регистре
-     * @param refLower    блок требования в нижнем регистре или {@code null}
+     * @param text         текст (фрагмент текста или абсолютный URL)
+     * @param docLower     документ в нижнем регистре
+     * @param refLower     блок требования в нижнем регистре или {@code null}
      * @param answersLower ответы в нижнем регистре или {@code null}
-     * @param ungrounded  накопитель описаний вырезанного; изменяется
+     * @param ungrounded   накопитель описаний вырезанного; изменяется
+     * @param valuesAreInput {@code true}, если значения параметров — входные данные теста
      * @return текст без необоснованных параметров
      */
     private String stripUngroundedQueryParams(String text, String docLower, String refLower,
-                                              String answersLower, Set<String> ungrounded) {
+                                              String answersLower, Set<String> ungrounded,
+                                              boolean valuesAreInput) {
         Matcher m = QUERY_PARAM.matcher(text);
         StringBuilder sb = new StringBuilder();
         int last = 0;
@@ -576,10 +643,9 @@ public class SyncGenerationService {
             if (value == null || value.isBlank()) {
                 continue;
             }
-            String valueLower = value.toLowerCase(Locale.ROOT);
-            boolean grounded = containsToken(docLower, valueLower)
-                    || containsToken(refLower, valueLower)
-                    || (answersLower != null && containsToken(answersLower, valueLower));
+            boolean grounded = valuesAreInput
+                    ? isGroundedToken(name.substring(1), docLower, refLower, answersLower)
+                    : isGroundedToken(value, docLower, refLower, answersLower);
             if (grounded) {
                 continue;
             }
@@ -590,7 +656,7 @@ public class SyncGenerationService {
                     && QUERY_PARAM_NEXT.matcher(text.substring(next + 1)).lookingAt()) {
                 // Первый параметр удалён, следующий становится первым: "?a=1&b=2" -> "?b=2"
                 sb.append(stripUngroundedQueryParams("?" + text.substring(next + 1),
-                        docLower, refLower, answersLower, ungrounded));
+                        docLower, refLower, answersLower, ungrounded, valuesAreInput));
                 return sb.toString();
             }
             last = next;
@@ -677,23 +743,20 @@ public class SyncGenerationService {
     }
 
     /**
-     * Проверяет, что в тексте есть этот HTTP-код рядом со словом-контекстом (проверяется любое вхождение
-     * кода в тексте, а не конкретное совпадение). Слова-контексты: {@code http}, {@code статус},
-     * {@code status}, {@code ошибк}, {@code error}, {@code ответ}, {@code response}, {@code код}.
-     * Контекст должен быть в пределах 40 символов от кода. Формы «HTTP 418» и «418 ... error» считаются обоснованными.
+     * Проверяет, что токен обоснован: встречается как отдельное слово в документе, блоке требования или ответах
+     * пользователя. Тексты сравниваются в нижнем регистре; {@code token} может быть в любом регистре.
      *
-     * @param text текст тест-кейса
-     * @param code HTTP-код из трёх цифр
-     * @return {@code true}, если рядом есть слово-контекст
+     * @param token        токен
+     * @param docLower     документ в нижнем регистре
+     * @param refLower     блок требования в нижнем регистре или {@code null}
+     * @param answersLower ответы в нижнем регистре или {@code null}
+     * @return {@code true}, если токен есть в одном из источников
      */
-    private boolean isGroundedHttpContext(String text, String code) {
-        // (?i) не распознаёт кириллицу без UNICODE_CASE, поэтому флаги передаются явно
-        Pattern p = Pattern.compile(
-                "(?:HTTP\\s*|(?:http|статус|status|ошибк|error|ответ|response|код).{0,40}\\b)"
-                        + Pattern.quote(code) + "\\b|\\b" + Pattern.quote(code)
-                        + "\\b.{0,40}(?:http|статус|status|ошибк|error|ответ|response|код)",
-                Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
-        return p.matcher(text).find();
+    private boolean isGroundedToken(String token, String docLower, String refLower, String answersLower) {
+        String lower = token.toLowerCase(Locale.ROOT);
+        return containsToken(docLower, lower)
+                || containsToken(refLower, lower)
+                || (answersLower != null && containsToken(answersLower, lower));
     }
 
     /**
@@ -885,7 +948,8 @@ public class SyncGenerationService {
 
     /**
      * Извлекает раздел документа, соответствующий требованию.
-     * Раздел начинается с первого заголовка Markdown, в тексте которого есть {@code ref}, и заканчивается
+     * Раздел начинается с первого заголовка Markdown, в тексте которого есть {@code ref} как целый идентификатор
+     * (за ним не идут буквы, цифры, подчёркивание или дефис), и заканчивается
      * перед следующим заголовком того же или более высокого уровня (меньшее число решёток).
      * Регистр учитывается, {@code ref} экранируется.
      *
@@ -901,8 +965,9 @@ public class SyncGenerationService {
         String[] lines = markdown.split("\n", -1);
         int startLine = -1;
         int headingLevel = -1;
+        // После идентификатора не должно идти буквы, цифры, подчёркивания или дефиса: FR-UI-1 не совпадает с FR-UI-10
         Pattern headingWithRef = Pattern.compile(
-                "^(#{1,6})\\s+.*" + Pattern.quote(ref) + ".*$");
+                "^(#{1,6})\\s+.*" + Pattern.quote(ref) + "(?![\\p{L}\\p{N}_\\-]).*$");
         for (int i = 0; i < lines.length; i++) {
             Matcher m = headingWithRef.matcher(lines[i]);
             if (m.find()) {
@@ -946,9 +1011,10 @@ public class SyncGenerationService {
     /**
      * Объединяет уточнения по {@code requirementRef}: на одно требование остаётся один вопрос.
      * <p>
-     * Основным считается первое уточнение типа {@code MISSING_REQUIREMENT}, а если его нет, то первое
-     * в группе. Его {@code reason} сохраняется. Если в группе несколько уточнений, их вопросы добавляются
-     * в конец {@code reason} с префиксом «Дополнительные детали: ».
+     * Вызывается только для вопросов к пользователю ({@code MISSING_REQUIREMENT}); {@code UNGROUNDED_ASSUMPTION}
+     * сюда не передаются и не сливаются. Основным считается первое уточнение типа {@code MISSING_REQUIREMENT},
+     * а если его нет, то первое в группе. Его {@code reason} сохраняется. Если в группе несколько уточнений,
+     * их вопросы добавляются в конец {@code reason} с префиксом «Дополнительные детали: ».
      * Порядок групп сохраняется.
      *
      * @param src уточнения до дедупликации
@@ -1000,7 +1066,8 @@ public class SyncGenerationService {
         Set<String> fields = new TreeSet<>();
         Set<String> numbers = new TreeSet<>();
 
-        Matcher m = Pattern.compile("(/[a-zA-Z0-9_\\-./{}]+)").matcher(markdown);
+        // Перед «/» не должна стоять буква или цифра: иначе «and/or» и «24/7» дают ложные пути
+        Matcher m = Pattern.compile("(?<![A-Za-z0-9])(/[a-zA-Z0-9_\\-./{}]+)").matcher(markdown);
         while (m.find()) {
             String u = m.group(1);
             if (u.length() > 1 && !u.endsWith("//")) urls.add(u);
@@ -1010,9 +1077,10 @@ public class SyncGenerationService {
 
         m = HTTP_METHOD.matcher(markdown);
         while (m.find()) methods.add(m.group(1));
+        // Все коды, которые есть в документе: без белого списка, иначе модель получила бы коды без связи с ним
         m = CONCRETE_HTTP_CODE.matcher(markdown);
         while (m.find()) {
-            if (HTTP_CODE_WHITELIST.contains(m.group(1))) httpCodes.add(m.group(1));
+            httpCodes.add(m.group(1));
         }
         m = CONCRETE_FIELD_NAME.matcher(markdown);
         while (m.find()) fields.add(m.group(1));

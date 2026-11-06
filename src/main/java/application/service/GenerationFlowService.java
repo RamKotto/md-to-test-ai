@@ -14,6 +14,7 @@ import application.repository.ClarificationSessionRepository;
 import application.repository.ClarificationSessionRepository.AnswerRow;
 import application.repository.ClarificationSessionRepository.SessionRow;
 import application.repository.GenerationRepository;
+import application.repository.JobRepository.JobRow;
 import application.service.AnswerMerger.MergedAnswer;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -32,6 +33,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
@@ -42,6 +44,11 @@ import java.util.UUID;
  * Все артефакты и сессия пишутся в БД ({@code qa.artifacts}, {@code qa.clarification_sessions},
  * {@code qa.clarification_answers}). Запись прогона выполняется в одной транзакции: при сбое любого шага
  * (включая вызов модели в ответе на уточнения) БД остаётся в прежнем состоянии.
+ * <p>
+ * Долгие операции ({@link #generate} и {@link #answer}) асинхронные: метод проверяет вход, создаёт или переводит
+ * задачу в {@code PROCESSING} ({@code qa.jobs}) и возвращает состояние (202). Вызов модели, запись файлов и сессии
+ * выполняются в фоне через {@link JobService}; результат фиксируется статусом задачи {@code DONE} или {@code FAILED}.
+ * Статус {@code DONE} задачи пишется в той же транзакции, что и результат, поэтому они согласованы.
  */
 @Service
 @RequiredArgsConstructor
@@ -89,6 +96,7 @@ public class GenerationFlowService {
     private final GenerationRepository repository;
     private final ObjectMapper mapper;
     private final TransactionTemplate tx;
+    private final JobService jobs;
 
     /**
      * Состояние сессии в {@code qa.clarification_sessions.state}.
@@ -115,60 +123,127 @@ public class GenerationFlowService {
     }
 
     /**
-     * Первичная генерация тест-кейсов. Файлы и (при необходимости) сессия записываются в одной транзакции.
+     * Запускает первичную генерацию тест-кейсов в фоне и сразу возвращает состояние задачи.
+     * <p>
+     * Синхронно: проверяются источник ({@code markdown} или {@code pdfToMdUrl} по allowlist) и размер переданного
+     * Markdown; вычисляется префикс имён; создаются {@code taskId} и задача {@code PROCESSING}.
+     * В фоне ({@link #runGenerate}): скачивание из pdf-to-md (если нужно), генерация, запись файлов и сессии
+     * (для любого статуса), задача {@code DONE}. Ошибки фона попадают в задачу как {@code FAILED}.
      *
      * @param request тело запроса; должен быть задан {@code markdown} или {@code pdfToMdUrl}
-     * @return ответ с {@code version = 1}
-     * @throws IllegalArgumentException документ слишком велик для сессии, источник не задан или некорректен
+     * @return состояние задачи: {@code jobStatus = PROCESSING}, {@code status = null}, {@code version = 0}
+     * @throws IllegalArgumentException источник не задан, URL некорректен или документ слишком велик (ответ {@code 400})
      */
-    public GenerateResponse generate(GenerateRequest request) {
+    public ObjectNode generate(GenerateRequest request) {
+        validateSource(request);
+        String prefix = sanitizePrefix(request.filename());
+        UUID taskId = UUID.randomUUID();
+        JobRow job = jobs.create(taskId);
+        jobs.runInBackground(taskId, () -> runGenerate(taskId, request, prefix));
+        return state(taskId, job, null);
+    }
+
+    /**
+     * Синхронная проверка источника первичной генерации. Скачивание из pdf-to-md здесь не выполняется.
+     *
+     * @param request тело запроса
+     * @throws IllegalArgumentException если ни одно поле не задано, URL некорректен или markdown слишком велик
+     */
+    private void validateSource(GenerateRequest request) {
+        if (request.hasMarkdown()) {
+            checkSize(request.markdown());
+        } else if (request.hasPdfToMdUrl()) {
+            pdfToMdClient.validateUrl(request.pdfToMdUrl());
+        } else {
+            throw new IllegalArgumentException("Нужно передать либо markdown, либо pdfToMdUrl");
+        }
+    }
+
+    /**
+     * Фоновая часть первичной генерации. Файлы, сессия и статус {@code DONE} записываются одной транзакцией.
+     * Исключения не перехватываются: их переводит в {@code FAILED} {@link JobService}.
+     *
+     * @param taskId  идентификатор задачи и прогона
+     * @param request тело запроса
+     * @param prefix  префикс имён файлов
+     */
+    private void runGenerate(UUID taskId, GenerateRequest request, String prefix) {
         String markdown = resolveMarkdown(request);
+        checkSize(markdown);
         var result = generationService.generate(markdown);
 
-        UUID runId = UUID.randomUUID();
-        String prefix = sanitizePrefix(request.filename());
         List<TestCase> cases = nullToEmpty(result.testCases());
         List<Clarification> clarifications = nullToEmpty(result.clarifications());
         String status = statusOf(clarifications);
-        boolean needsSession = STATUS_NEEDS_CLARIFICATION.equals(status);
-        if (needsSession) {
-            checkSize(markdown);
-        }
         Map<String, String> filesById = planNames(cases, clarifications, prefix, Map.of());
 
-        return tx.execute(s -> {
-            GenerateResponse response = commitRun(runId, status, prefix, markdown, cases, clarifications,
+        tx.executeWithoutResult(s -> {
+            GenerateResponse response = commitRun(taskId, status, prefix, markdown, cases, clarifications,
                     filesById, List.of(), 1);
-            if (needsSession) {
-                sessions.insert(runId, status,
-                        toJson(new SessionState(markdown, toJson(cases), prefix, filesById,
-                                mapper.valueToTree(response))),
-                        toJson(clarifications));
-            }
-            return response;
+            // Сессия создаётся при любом статусе: результат доступен через GET после перезагрузки страницы
+            sessions.insert(taskId, status,
+                    toJson(new SessionState(markdown, toJson(cases), prefix, filesById,
+                            mapper.valueToTree(response))),
+                    toJson(clarifications));
+            jobs.markDone(taskId);
         });
     }
 
     /**
-     * Ответы пользователя на уточнения.
+     * Принимает ответы пользователя на уточнения и запускает обработку в фоне.
      * <p>
-     * В одной транзакции с блокировкой строки сессии: проверка {@code expectedVersion}; запись непустых
-     * ответов с {@code round = round + 1}; вызов модели с полным дедуплицированным набором ответов сессии;
-     * замена файлов прогона; обновление сессии ({@code version + 1}, {@code round + 1}). Любой сбой
-     * откатывает все шаги.
+     * Синхронно: сессия существует и не истекла; её статус {@code NEEDS_CLARIFICATION}; {@code expectedVersion}
+     * совпадает с версией; задача переходит в {@code PROCESSING} условным UPDATE (если уже выполняется, ответ 409).
+     * В фоне ({@link #runAnswer}): повторная проверка под блокировкой строки, модель, файлы, сессия и
+     * задача {@code DONE} в одной транзакции.
      *
      * @param taskId  идентификатор прогона
      * @param request ответы и необязательная версия
-     * @return ответ с уже увеличенной версией
-     * @throws IllegalArgumentException сессия не найдена или истекла (ответ {@code 400})
-     * @throws application.exception.ConflictException версия не совпадает (ответ {@code 409})
+     * @return состояние задачи (данные последней успешной версии) с {@code jobStatus = PROCESSING}
+     * @throws IllegalArgumentException сессия не найдена или истекла, либо уже завершена (ответ {@code 400})
+     * @throws application.exception.ConflictException версия не совпадает или операция уже выполняется (ответ {@code 409})
      */
-    public GenerateResponse answer(String taskId, AnswerRequest request) {
+    public ObjectNode answer(String taskId, AnswerRequest request) {
         UUID id = parseSessionId(taskId);
-        return tx.execute(s -> {
+        SessionRow row = sessions.findActive(id)
+                .orElseThrow(() -> new IllegalArgumentException(SESSION_NOT_FOUND));
+        // Сессия DONE — только для просмотра истории: повторная генерация по ней не запускается
+        if (!STATUS_NEEDS_CLARIFICATION.equals(row.status())) {
+            throw new IllegalArgumentException("Сессия уже завершена, ответы не принимаются");
+        }
+        AnswerMerger.checkExpectedVersion(request.expectedVersion(), row.version());
+
+        // Без question ответ не сопоставится с уточнением: все ответы сольются в один ключ дедупликации
+        if (request.answers() != null) {
+            for (AnswerRequest.Answer a : request.answers()) {
+                if (a != null && a.answer() != null && !a.answer().isBlank()
+                        && (a.question() == null || a.question().isBlank())) {
+                    throw new IllegalArgumentException("Ответ должен содержать question (текст уточнения)");
+                }
+            }
+        }
+
+        JobRow job = jobs.startAgain(id);
+        jobs.runInBackground(id, () -> runAnswer(id, request));
+        // Сессию перечитываем после перехода в PROCESSING: до него другой ответ мог завершиться
+        SessionRow current = sessions.findActive(id).orElse(row);
+        return state(id, job, current);
+    }
+
+    /**
+     * Фоновая часть ответа на уточнения. В одной транзакции с блокировкой строки сессии: повторная проверка
+     * статуса и {@code expectedVersion}; запись непустых ответов с {@code round = round + 1}; вызов модели
+     * с полным дедуплицированным набором ответов; замена файлов прогона; обновление сессии
+     * ({@code version + 1}, {@code round + 1}); задача {@code DONE}. Любой сбой откатывает все шаги,
+     * задача переходит в {@code FAILED} (см. {@link JobService}).
+     *
+     * @param id      идентификатор прогона
+     * @param request ответы и необязательная версия
+     */
+    private void runAnswer(UUID id, AnswerRequest request) {
+        tx.executeWithoutResult(s -> {
             SessionRow row = sessions.lockActive(id)
                     .orElseThrow(() -> new IllegalArgumentException(SESSION_NOT_FOUND));
-            // Сессия DONE — только для просмотра истории: повторная генерация по ней не запускается
             if (!STATUS_NEEDS_CLARIFICATION.equals(row.status())) {
                 throw new IllegalArgumentException("Сессия уже завершена, ответы не принимаются");
             }
@@ -199,41 +274,77 @@ public class GenerationFlowService {
                     .toList();
 
             int version = row.version() + 1;
-            GenerateResponse response = commitRun(UUID.fromString(taskId), status, state.filenamePrefix(),
+            GenerateResponse response = commitRun(id, status, state.filenamePrefix(),
                     state.markdown(), cases, clarifications, filesById, stale, version);
             sessions.updateTurn(id, version, round, status,
                     toJson(new SessionState(state.markdown(), toJson(cases), state.filenamePrefix(), filesById,
                             mapper.valueToTree(response))),
                     toJson(clarifications));
-            return response;
+            jobs.markDone(id);
         });
     }
 
     /**
-     * Возвращает состояние сессии в формате {@code GET /api/generate/{taskId}}: последний ответ POST
-     * плюс статус, версию, раунд, уточнения, историю ответов, черновик и срок хранения.
+     * Возвращает состояние задачи и сессии в формате {@code GET /api/generate/{taskId}}: поля задачи
+     * ({@code jobStatus}, {@code jobError}, {@code jobStartedAt}) и поля последней успешной версии сессии
+     * (последний ответ сервиса, статус, версия, раунд, уточнения, история ответов, черновик, срок хранения).
+     * <p>
+     * Если сессии ещё нет (первая операция выполняется или упала), возвращается состояние с {@code status = null}
+     * и пустыми данными.
      *
      * @param taskId идентификатор прогона
-     * @return JSON-объект ответа
-     * @throws IllegalArgumentException сессия не найдена или истекла (ответ {@code 400})
+     * @return JSON-объект состояния
+     * @throws IllegalArgumentException нет ни задачи, ни сессии (ответ {@code 400})
      */
     public ObjectNode get(String taskId) {
         UUID id = parseSessionId(taskId);
-        SessionRow row = sessions.findActive(id)
-                .orElseThrow(() -> new IllegalArgumentException(SESSION_NOT_FOUND));
-        SessionState state = readState(row.stateJson());
+        Optional<JobRow> job = jobs.find(id);
+        Optional<SessionRow> session = sessions.findActive(id);
+        if (job.isEmpty() && session.isEmpty()) {
+            throw new IllegalArgumentException(SESSION_NOT_FOUND);
+        }
+        return state(id, job.orElse(null), session.orElse(null));
+    }
 
-        ObjectNode out = state.lastResponse() instanceof ObjectNode last
-                ? last.deepCopy()
-                : mapper.createObjectNode();
-        out.put("taskId", id.toString());
-        out.put("status", row.status());
-        out.put("version", row.version());
-        out.put("round", row.round());
-        out.set("clarifications", readTree(row.clarificationsJson()));
-        out.set("answers", answersNode(sessions.findAnswers(id)));
-        out.set("draft", readTree(row.draftJson()));
-        out.put("expiresAt", row.expiresAt().toString());
+    /**
+     * Собирает ответ в формате контракта: сначала поля задачи, затем последний ответ сервиса
+     * ({@code state.lastResponse}) и поля сессии. Без сессии данные пустые, {@code status = null}, {@code version = 0}.
+     *
+     * @param taskId  идентификатор прогона
+     * @param job     состояние задачи или {@code null}, если строки задачи нет
+     * @param session строка сессии или {@code null}, если сессии нет
+     * @return JSON-объект состояния
+     */
+    private ObjectNode state(UUID taskId, JobRow job, SessionRow session) {
+        ObjectNode out = mapper.createObjectNode();
+        out.put("taskId", taskId.toString());
+        out.put("jobStatus", job == null ? null : job.status());
+        out.put("jobError", job == null ? null : job.error());
+        out.put("jobStartedAt", job == null ? null : job.startedAt().toString());
+        if (session == null) {
+            out.putNull("status");
+            out.put("version", 0);
+            out.put("round", 0);
+            out.set("testCases", mapper.createArrayNode());
+            out.set("clarifications", mapper.createArrayNode());
+            out.set("files", mapper.createArrayNode());
+            out.set("answers", mapper.createArrayNode());
+            out.set("draft", mapper.createObjectNode());
+            out.putNull("expiresAt");
+            return out;
+        }
+        SessionState state = readState(session.stateJson());
+        if (state.lastResponse() instanceof ObjectNode last) {
+            out.setAll(last.deepCopy());
+        }
+        out.put("taskId", taskId.toString());
+        out.put("status", session.status());
+        out.put("version", session.version());
+        out.put("round", session.round());
+        out.set("clarifications", readTree(session.clarificationsJson()));
+        out.set("answers", answersNode(sessions.findAnswers(taskId)));
+        out.set("draft", readTree(session.draftJson()));
+        out.put("expiresAt", session.expiresAt().toString());
         return out;
     }
 

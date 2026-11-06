@@ -35,6 +35,9 @@ public class AppProperties {
     /** Настройки ограничений сессий уточнений. */
     @Valid
     private Sessions sessions = new Sessions();
+    /** Настройки пула фоновых задач асинхронных операций. */
+    @Valid
+    private Jobs jobs = new Jobs();
 
     /** Тексты промптов для LLM и JSON-схема ответа. */
     @Valid
@@ -97,6 +100,26 @@ public class AppProperties {
          */
         @Min(1)
         private int maxMarkdownChars = 1_000_000;
+    }
+
+    /**
+     * Пул фоновых задач ({@code app.jobs}). Значения задаются в {@code application.yml}.
+     * Максимум потоков должен быть не меньше базового числа, иначе пул не стартует.
+     */
+    @Data
+    public static class Jobs {
+
+        /** Число потоков, которые работают постоянно (минимум 1). */
+        @Min(1)
+        private int corePoolSize = 2;
+
+        /** Максимум потоков при заполненной очереди (минимум 1). */
+        @Min(1)
+        private int maxPoolSize = 4;
+
+        /** Длина очереди ожидающих задач; при переполнении операция получает 503 (минимум 0). */
+        @Min(0)
+        private int queueCapacity = 20;
     }
 
     /**

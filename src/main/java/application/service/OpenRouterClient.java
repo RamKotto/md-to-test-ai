@@ -79,23 +79,10 @@ public class OpenRouterClient {
                     .retrieve()
                     .body(Map.class);
 
-            if (response == null) {
-                throw new GenerationException("Пустой ответ от OpenRouter");
+            if (response != null && response.get("usage") != null) {
+                log.debug("OpenRouter usage: {}", response.get("usage"));
             }
-            Object usage = response.get("usage");
-            if (usage != null) {
-                log.debug("OpenRouter usage: {}", usage);
-            }
-            var choices = (List<Map<String, Object>>) response.get("choices");
-            if (choices == null || choices.isEmpty()) {
-                throw new GenerationException("OpenRouter не вернул choices");
-            }
-            var message = (Map<String, Object>) choices.get(0).get("message");
-            Object content = message == null ? null : message.get("content");
-            if (content == null) {
-                throw new GenerationException("Пустой content в ответе OpenRouter");
-            }
-            return content.toString();
+            return extractContent(response);
         } catch (GenerationException e) {
             throw e;
         } catch (HttpStatusCodeException e) {
@@ -106,6 +93,37 @@ public class OpenRouterClient {
             log.error("Ошибка OpenRouter", e);
             throw new GenerationException("OpenRouter: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * Извлекает текст первого варианта ответа из тела chat/completions и проверяет, что генерация
+     * не оборвана лимитом токенов: при {@code finish_reason = "length"} JSON обрезан и невалиден.
+     *
+     * @param response тело ответа OpenRouter; может быть {@code null}
+     * @return содержимое {@code choices[0].message.content}
+     * @throws GenerationException если ответ пустой, не содержит {@code choices} или {@code content},
+     *                             либо ответ обрезан по {@code max_tokens}
+     */
+    @SuppressWarnings("unchecked")
+    static String extractContent(Map<String, Object> response) {
+        if (response == null) {
+            throw new GenerationException("Пустой ответ от OpenRouter");
+        }
+        var choices = (List<Map<String, Object>>) response.get("choices");
+        if (choices == null || choices.isEmpty()) {
+            throw new GenerationException("OpenRouter не вернул choices");
+        }
+        Map<String, Object> first = choices.get(0);
+        if ("length".equals(first.get("finish_reason"))) {
+            throw new GenerationException("Ответ модели обрезан по max_tokens: уменьшите документ "
+                    + "или увеличьте openrouter.max-output-tokens");
+        }
+        var message = (Map<String, Object>) first.get("message");
+        Object content = message == null ? null : message.get("content");
+        if (content == null) {
+            throw new GenerationException("Пустой content в ответе OpenRouter");
+        }
+        return content.toString();
     }
 
     /**

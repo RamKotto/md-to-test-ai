@@ -8,8 +8,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+
+import java.lang.reflect.Method;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -229,13 +232,17 @@ class SyncGenerationServiceTest {
                         .isEqualTo("Переход по https://example.com/login?action=Войти выполнен"));
     }
 
+    /**
+     * Два вопроса типа MISSING_REQUIREMENT по одному требованию сливаются: первый сохраняет reason,
+     * второй уходит в «Дополнительные детали».
+     */
     @Test
     void clarificationsForSameRequirement_keepPrimaryReason_andAppendExtraQuestions() {
         modelReturns("""
                 {"testCases":[%s],
                  "clarifications":[
                    {"requirementRef":"REQ-1","question":"Какое сообщение при неверном пароле?","reason":"в документе не описано","type":"MISSING_REQUIREMENT"},
-                   {"requirementRef":"REQ-1","question":"Сколько попыток входа допустимо?","reason":"нет данных","type":"UNGROUNDED_ASSUMPTION"}
+                   {"requirementRef":"REQ-1","question":"Сколько попыток входа допустимо?","reason":"нет данных","type":"MISSING_REQUIREMENT"}
                  ]}
                 """.formatted(VALID_CASE_1));
 
@@ -249,8 +256,39 @@ class SyncGenerationServiceTest {
         });
     }
 
+    /**
+     * UNGROUNDED_ASSUMPTION не сливается с вопросом MISSING_REQUIREMENT по тому же требованию:
+     * тип сохраняется, запись остаётся отдельной.
+     */
     @Test
-    void httpCodeWithCyrillicContextWord_isNotWrappedAsHttpCode() {
+    void clarificationsForSameRequirement_ungroundedNotMerged_typeKept() {
+        modelReturns("""
+                {"testCases":[%s],
+                 "clarifications":[
+                   {"requirementRef":"REQ-1","question":"Какое сообщение при неверном пароле?","reason":"в документе не описано","type":"MISSING_REQUIREMENT"},
+                   {"requirementRef":"REQ-1","question":"Сколько попыток входа допустимо?","reason":"нет данных","type":"UNGROUNDED_ASSUMPTION"}
+                 ]}
+                """.formatted(VALID_CASE_1));
+
+        var result = service.generate(MARKDOWN);
+
+        assertThat(result.clarifications()).hasSize(2);
+        assertThat(result.clarifications().get(0)).satisfies(c -> {
+            assertThat(c.question()).isEqualTo("Какое сообщение при неверном пароле?");
+            assertThat(c.reason()).isEqualTo("в документе не описано");
+            assertThat(c.type()).isEqualTo(ClarificationType.MISSING_REQUIREMENT);
+        });
+        assertThat(result.clarifications().get(1)).satisfies(c -> {
+            assertThat(c.question()).isEqualTo("Сколько попыток входа допустимо?");
+            assertThat(c.type()).isEqualTo(ClarificationType.UNGROUNDED_ASSUMPTION);
+        });
+    }
+
+    /**
+     * Код 418 нет в документе: контекст «Статус» не делает его обоснованным, код заменяется описанием.
+     */
+    @Test
+    void httpCodeNotInDocument_isReplacedEvenWithContextWord() {
         modelReturns("""
                 {"testCases":[
                   {"id":"TC-UI-001","type":"UI","title":"Статус ответа","requirementRef":"REQ-1",
@@ -260,11 +298,142 @@ class SyncGenerationServiceTest {
 
         var result = service.generate(MARKDOWN);
 
-        // Код 418 распознан как обоснованный (контекст «Статус»), поэтому префикс «HTTP » не добавляется;
-        // число 418 вырезается отдельной проверкой чисел
         assertThat(result.testCases()).singleElement().satisfies(tc ->
                 assertThat(tc.expectedResult())
-                        .isEqualTo("Статус [значение из ответа на уточнение] отображается"));
+                        .isEqualTo("Статус [код ответа уточняется] отображается"));
+    }
+
+    /**
+     * Код 418 есть в блоке требования: обоснован, остаётся в тексте.
+     */
+    @Test
+    void httpCodeFromDocument_isKept() {
+        String markdown = """
+                # Требования
+
+                ## REQ-2 Статус
+
+                Сервис отвечает кодом 418 на запрос чайника.
+                """;
+        modelReturns("""
+                {"testCases":[
+                  {"id":"TC-UI-001","type":"UI","title":"Статус ответа","requirementRef":"REQ-2",
+                   "steps":["Открыть страницу входа"],"expectedResult":"Статус 418 отображается","priority":"P2"}
+                ],"clarifications":[]}
+                """);
+
+        var result = service.generate(markdown);
+
+        assertThat(result.testCases()).singleElement()
+                .satisfies(tc -> assertThat(tc.expectedResult()).isEqualTo("Статус 418 отображается"));
+        assertThat(result.clarifications()).isEmpty();
+    }
+
+    /**
+     * Распространённый код 200 без связи с документом не проходит: белого списка больше нет.
+     */
+    @Test
+    void http200NotInDocument_isReplaced() {
+        modelReturns("""
+                {"testCases":[
+                  {"id":"TC-UI-001","type":"UI","title":"Успешный ответ","requirementRef":"REQ-1",
+                   "steps":["Открыть страницу входа"],"expectedResult":"Сервер возвращает 200 при успехе","priority":"P2"}
+                ],"clarifications":[]}
+                """);
+
+        var result = service.generate(MARKDOWN);
+
+        assertThat(result.testCases()).singleElement()
+                .satisfies(tc -> assertThat(tc.expectedResult())
+                        .isEqualTo("Сервер возвращает [код ответа уточняется] при успехе"));
+    }
+
+    /**
+     * В NEGATIVE-шаге входное значение (число за пределом лимита) остаётся тестовыми данными,
+     * а HTTP-код, которого нет в документе, по-прежнему заменяется.
+     */
+    @Test
+    void negativeSteps_inputValuesKept_httpCodeStillChecked() {
+        modelReturns("""
+                {"testCases":[
+                  {"id":"TC-NEG-001","type":"NEGATIVE","title":"Слишком длинное имя","requirementRef":"REQ-1",
+                   "preconditions":[],"steps":["Ввести имя из 1001 символа","Отправить форму, сервер отвечает 418"],
+                   "expectedResult":"Система отклоняет запрос","priority":"P1"}
+                ],"clarifications":[]}
+                """);
+
+        var result = service.generate(MARKDOWN);
+
+        assertThat(result.testCases()).singleElement().satisfies(tc -> {
+            assertThat(tc.steps()).containsExactly(
+                    "Ввести имя из 1001 символа",
+                    "Отправить форму, сервер отвечает [код ответа уточняется]");
+            assertThat(tc.expectedResult()).isEqualTo("Система отклоняет запрос");
+        });
+    }
+
+    /**
+     * Регулярка путей не берёт «/» внутри слов и дробей: «and/or» и «24/7» не попадают в подсказку URL.
+     */
+    @Test
+    void allowedTokens_pathRegexIgnoresSlashInsideWords() {
+        String markdown = """
+                # Требования
+
+                ## REQ-1 Поиск
+
+                Режим and/or, нагрузка 24/7, запрос GET /users/{id} к сервису.
+                """;
+        modelReturns("{\"testCases\":[],\"clarifications\":[]}");
+
+        service.generate(markdown);
+
+        ArgumentCaptor<String> userText = ArgumentCaptor.forClass(String.class);
+        verify(openRouter).complete(anyString(), userText.capture());
+        String urlLine = userText.getValue().lines()
+                .filter(line -> line.startsWith("- URL: "))
+                .findFirst()
+                .orElseThrow();
+        assertThat(urlLine).contains("/users/{id}").doesNotContain("/or").doesNotContain("/7");
+    }
+
+    /**
+     * Ссылка FR-UI-1 не совпадает с заголовком FR-UI-10: раздел берётся по целому идентификатору.
+     */
+    @Test
+    void requirementBlock_refMatchesWholeIdentifierOnly() throws Exception {
+        String markdown = """
+                ## FR-UI-10 Таймаут
+                Лимит 600 символов.
+
+                ## FR-UI-1 Вход
+                Кнопка Войти.
+                """;
+        Method extract = SyncGenerationService.class.getDeclaredMethod(
+                "extractRequirementBlock", String.class, String.class);
+        extract.setAccessible(true);
+
+        String block = (String) extract.invoke(service, markdown, "FR-UI-1");
+
+        assertThat(block).contains("Кнопка Войти").doesNotContain("Лимит 600");
+    }
+
+    /**
+     * Неизвестный тип уточнения не роняет ответ: уточнение становится MISSING_REQUIREMENT.
+     */
+    @Test
+    void unknownClarificationType_becomesMissingRequirement() {
+        modelReturns("""
+                {"testCases":[%s],
+                 "clarifications":[{"requirementRef":"REQ-1","question":"Какой срок хранения?","reason":"нет","type":"SOMETHING_NEW"}]}
+                """.formatted(VALID_CASE_1));
+
+        var result = service.generate(MARKDOWN);
+
+        assertThat(result.clarifications()).singleElement().satisfies(c -> {
+            assertThat(c.question()).isEqualTo("Какой срок хранения?");
+            assertThat(c.type()).isEqualTo(ClarificationType.MISSING_REQUIREMENT);
+        });
     }
 
     @Test

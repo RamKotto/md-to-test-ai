@@ -3,6 +3,8 @@ package application.exception;
 import application.dto.ErrorResponse;
 import jakarta.validation.ConstraintViolationException;
 import lombok.extern.slf4j.Slf4j;
+import application.service.JobService;
+import org.springframework.core.task.TaskRejectedException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -28,6 +30,7 @@ import java.time.Instant;
  * {@link MethodArgumentTypeMismatchException}) — 400; {@link HttpRequestMethodNotSupportedException} — 405;
  * {@link HttpMediaTypeNotSupportedException} — 415; {@link NoResourceFoundException} — 404;
  * {@link GenerationException} и {@link PdfToMdClientException} — 502;
+ * {@link TaskRejectedException} (очередь фоновых задач переполнена) — 503;
  * {@link StorageException} и любые прочие исключения — 500.
  */
 @Slf4j
@@ -71,6 +74,19 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(ConflictException.class)
     public ResponseEntity<ErrorResponse> conflict(ConflictException e) {
         return build(HttpStatus.CONFLICT, e.getMessage());
+    }
+
+    /**
+     * Очередь фоновых задач переполнена: операция отклонена до запуска. Клиент может повторить запрос позже.
+     * Пишет предупреждение в лог.
+     *
+     * @param e исключение пула задач
+     * @return ответ с кодом {@code 503 Service Unavailable}
+     */
+    @ExceptionHandler(TaskRejectedException.class)
+    public ResponseEntity<ErrorResponse> busy(TaskRejectedException e) {
+        log.warn("Очередь фоновых задач переполнена: {}", e.getMessage());
+        return build(HttpStatus.SERVICE_UNAVAILABLE, JobService.REJECTED);
     }
 
     /**

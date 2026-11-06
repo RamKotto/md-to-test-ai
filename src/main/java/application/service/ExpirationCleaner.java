@@ -2,6 +2,7 @@ package application.service;
 
 import application.repository.ArtifactRepository;
 import application.repository.ClarificationSessionRepository;
+import application.repository.JobRepository;
 import application.repository.JournalRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -14,7 +15,7 @@ import org.springframework.stereotype.Component;
  * Очистка записей с истёкшим сроком хранения (30 дней).
  * <p>
  * Выполняется при старте приложения и затем каждые 6 часов. Чистятся артефакты этого сервиса
- * ({@code owner_service = 'md-to-test'}), сессии генерации ({@code service = 'generate'}) и журнал.
+ * ({@code owner_service = 'md-to-test'}), сессии и задачи генерации ({@code service = 'generate'}) и журнал.
  * Ошибка очистки логируется и не останавливает приложение.
  */
 @Slf4j
@@ -28,6 +29,7 @@ public class ExpirationCleaner {
     private final ArtifactRepository artifacts;
     private final ClarificationSessionRepository sessions;
     private final JournalRepository journal;
+    private final JobRepository jobs;
 
     /**
      * Очистка при старте приложения.
@@ -50,8 +52,8 @@ public class ExpirationCleaner {
      */
     public void cleanup() {
         try {
-            log.info("Очистка по сроку: артефакты={}, сессии={}, журнал={}",
-                    artifacts.deleteExpired(), sessions.deleteExpired(), journal.deleteExpired());
+            log.info("Очистка по сроку: артефакты={}, сессии={}, задачи={}, журнал={}",
+                    artifacts.deleteExpired(), sessions.deleteExpired(), jobs.deleteExpired(), journal.deleteExpired());
         } catch (RuntimeException e) {
             log.error("Очистка по сроку не выполнена", e);
         }

@@ -50,6 +50,25 @@ class AnswerMergerTest {
     }
 
     /**
+     * Регрессия: два ответа на два уточнения одного тест-кейса с разными question и без topicKey
+     * не сливаются в один ключ. Каждый ответ сохраняется со своим вопросом.
+     */
+    @Test
+    void merge_twoQuestionsSameCaseWithoutTopic_keepsBothAnswers() {
+        List<AnswerRow> history = List.of(
+                row(1, "TC-UI-001", "Какое сообщение при неверном пароле?", null, "Неверный пароль"),
+                row(1, "TC-UI-001", "Сколько попыток входа допустимо?", null, "3"));
+
+        var merged = AnswerMerger.merge(history);
+
+        assertThat(merged).hasSize(2);
+        assertThat(merged).extracting(AnswerMerger.MergedAnswer::question)
+                .containsExactly("Какое сообщение при неверном пароле?", "Сколько попыток входа допустимо?");
+        assertThat(merged).extracting(AnswerMerger.MergedAnswer::answer)
+                .containsExactly("Неверный пароль", "3");
+    }
+
+    /**
      * Пустые и пробельные ответы в набор для модели не попадают; краевые пробелы в ключе игнорируются.
      */
     @Test

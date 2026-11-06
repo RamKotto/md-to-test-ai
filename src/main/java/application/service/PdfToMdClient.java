@@ -146,7 +146,7 @@ public class PdfToMdClient {
      * @throws IllegalArgumentException если любая проверка не пройдена; сообщение содержит причину
      *                                  и, для хоста, список разрешённых хостов
      */
-    private URI validateUrl(String raw) {
+    public URI validateUrl(String raw) {
         if (raw == null || raw.isBlank()) {
             throw new IllegalArgumentException("pdfToMdUrl обязателен");
         }
